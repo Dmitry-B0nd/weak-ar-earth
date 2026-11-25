@@ -57,3 +57,25 @@ export function sunECI(t) {
 
 // «художественная» шкала основного проекта: радиус в сцене (в радиусах Земли) по расстоянию от центра (км)
 export const artR = (rkm) => 1 + 0.69 * Math.pow(Math.max(rkm - RE, 0) / RE, 0.324);
+
+// Элементы орбиты по положению и скорости (км, км/с) — для спутников, которые ведутся по SGP4:
+// точное состояние раз в полсекунды → элементы → видеокарта продолжает по Кеплеру.
+export function fromRV(r, v) {
+  const rr = Math.hypot(r[0], r[1], r[2]), vv2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2], rv = r[0] * v[0] + r[1] * v[1] + r[2] * v[2];
+  const h = [r[1] * v[2] - r[2] * v[1], r[2] * v[0] - r[0] * v[2], r[0] * v[1] - r[1] * v[0]], hh = Math.hypot(h[0], h[1], h[2]);
+  const a = 1 / (2 / rr - vv2 / MU);
+  const ev = [0, 1, 2].map((k) => ((vv2 - MU / rr) * r[k] - rv * v[k]) / MU), e = Math.hypot(ev[0], ev[1], ev[2]);
+  const i = Math.acos(Math.max(-1, Math.min(1, h[2] / hh)));
+  // направление на узел (у экваториальных — ось x)
+  let N = [-h[1], h[0], 0], nn = Math.hypot(N[0], N[1]);
+  const raan = nn > 1e-8 * hh ? Math.atan2(N[1], N[0]) : 0;
+  if (!(nn > 1e-8 * hh)) { N = [1, 0, 0]; nn = 1; }
+  const Nh = [N[0] / nn, N[1] / nn, 0], hu = [h[0] / hh, h[1] / hh, h[2] / hh];
+  const W = [hu[1] * Nh[2] - hu[2] * Nh[1], hu[2] * Nh[0] - hu[0] * Nh[2], hu[0] * Nh[1] - hu[1] * Nh[0]];   // в плоскости, 90° от узла
+  const ang = (x) => Math.atan2(x[0] * W[0] + x[1] * W[1] + x[2] * W[2], x[0] * Nh[0] + x[1] * Nh[1] + x[2] * Nh[2]);
+  const u = ang(r);                                         // аргумент широты
+  let argp = 0, nu = u;
+  if (e > 1e-7) { argp = ang(ev); nu = u - argp; }
+  const E = 2 * Math.atan(Math.sqrt((1 - e) / (1 + e)) * Math.tan(nu / 2));
+  return { a, e, i, raan, argp, M: E - e * Math.sin(E), n: Math.sqrt(MU / (a * a * a)) };
+}

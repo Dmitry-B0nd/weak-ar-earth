@@ -3,10 +3,11 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, RE, MU } from './orbit.js?v=0.11';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.12';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
+  if (e0.x <= 0.0) return vec3(1e4);                  // спутника нет (SGP4 не считает — сошёл с орбиты)
   float M = e1.y + e1.z * dt, e = e0.y, E = M;
   E = M + e * sin(E); E = M + e * sin(E); E = M + e * sin(E);
   float x = e0.x * (cos(E) - e), y = e0.x * sqrt(1.0 - e * e) * sin(E);
@@ -102,10 +103,23 @@ export function createSats(gl, list, groups, o = {}) {
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // пересчёт элементов на момент t (мс модельного времени)
+  // спутники, которые ведутся по SGP4 (у них простой расчёт разошёлся с SGP4): k → satrec
+  const sgp = new Map(); let propagate = null;
   function rebase(t, wall) {
     tRef = t; wallRef = wall;
+    const date = sgp.size ? new Date(t) : null;
     for (let k = 0; k < n; k++) {
-      const s = list[k].el, a = at(s, t), size = list[k].group === 'context' ? opt.ctxSize : opt.smallSize;
+      const size = list[k].group === 'context' ? opt.ctxSize : opt.smallSize;
+      const rec = sgp.get(k);
+      if (rec) {
+        let pv = null; try { pv = propagate(rec, date); } catch (e) { pv = null; }
+        if (pv && pv.position && pv.velocity) {
+          const q = fromRV([pv.position.x, pv.position.y, pv.position.z], [pv.velocity.x, pv.velocity.y, pv.velocity.z]);
+          el.set([q.a / RE, q.e, q.i, q.raan, q.argp, q.M, q.n, size], k * 8);
+        } else el.set([0, 0, 0, 0, 0, 0, 0, size], k * 8);
+        continue;
+      }
+      const s = list[k].el, a = at(s, t);
       el.set([s.a / RE, s.e, s.i, a.raan, a.argp, a.M, a.nNow, size], k * 8);
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, bE); gl.bufferSubData(gl.ARRAY_BUFFER, 0, el);
@@ -177,5 +191,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.disableVertexAttribArray(b0); gl.disableVertexAttribArray(b1); gl.disableVertexAttribArray(bq);
     }
   }
-  return { draw, n, nCtx: ctx.length, opt };
+  // перевести спутники (индексы в list) на SGP4: recs — satrec для каждого, prop — satellite.js propagate
+  function useSGP(idx, recs, prop) { propagate = prop; idx.forEach((k, j) => sgp.set(k, recs[j])); tRef = 0; }
+  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; } };
 }

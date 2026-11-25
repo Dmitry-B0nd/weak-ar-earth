@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.11';
-import { createRenderer } from './render.js?v=0.11';
-import { createPoseTrack } from './pose.js?v=0.11';
+import { BUILD } from './build.js?v=0.12';
+import { createRenderer } from './render.js?v=0.12';
+import { createPoseTrack } from './pose.js?v=0.12';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -30,21 +30,30 @@ const clock = () => ({ t: CLK.t0 + (performance.now() - CLK.w0) * SPEED, speed: 
 const SATINFO = { text: SATS === 0 ? 'нет' : 'грузятся…' };
 // Сверка с настоящим SGP4 (satellite.js) на этих данных: где окажется каждый спутник по расчёту лаборатории и по SGP4,
 // в пикселях «художественной» шкалы при листе 150 px. Один раз после загрузки, порциями, чтобы не было паузы.
-async function checkSGP4(sats, fromOMM) {
+// Спутники, у которых расхождение больше 2 px (обычно сильное торможение у старых данных), дальше ведутся по SGP4.
+async function checkSGP4(list) {
   const [{ json2satrec, propagate }, { posECI, artR }] = await Promise.all([import(`../vendor/satellite.mjs?v=${BUILD}`), import(`./orbit.js?v=${BUILD}`)]);
-  const t = clock().t, pxPerRe = 0.45 * 150, errs = [];
+  const t = clock().t, pxPerRe = 0.45 * 150, errs = [], bad = [], recs = [];
+  let worst = null;
   const toScene = (p) => { const r = Math.hypot(p[0], p[1], p[2]), k = artR(r) / r * pxPerRe; return [p[0] * k, p[1] * k, p[2] * k]; };
-  for (let i = 0; i < sats.length; i++) {
+  for (let i = 0; i < list.length; i++) {
+    let rec = null, e = Infinity;
     try {
-      const sg = propagate(json2satrec(sats[i].omm), new Date(t)).position; if (!sg) continue;
-      const a = toScene(posECI(fromOMM(sats[i].omm), t)), b = toScene([sg.x, sg.y, sg.z]);
-      errs.push(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]));
-    } catch (e) { /* пропуск */ }
+      rec = json2satrec(list[i].omm);
+      const sg = propagate(rec, new Date(t)).position;
+      if (sg) { const a = toScene(posECI(list[i].el, t)), b = toScene([sg.x, sg.y, sg.z]); e = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
+    } catch (x) { /* SGP4 не считает */ }
+    if (Number.isFinite(e)) errs.push(e);
+    if (!(e <= 2) && rec) { bad.push(i); recs.push(rec); }
+    if (Number.isFinite(e) && (!worst || e > worst.e)) worst = { e, i };
     if (i % 60 === 59) await new Promise((r) => setTimeout(r, 0));
   }
   errs.sort((x, y) => x - y);
-  SATINFO.check = `сверка с SGP4: медиана ${errs[errs.length >> 1].toFixed(1)} px, p99 ${errs[Math.floor(errs.length * 0.99)].toFixed(1)} px, макс ${errs[errs.length - 1].toFixed(1)} px (${errs.length} шт.)`;
+  if (bad.length && R.sats) R.sats.useSGP(bad, recs, propagate);
+  const w = worst ? list[worst.i] : null;
+  SATINFO.check = `сверка с SGP4: медиана ${errs[errs.length >> 1].toFixed(1)} px, p99 ${errs[Math.floor(errs.length * 0.99)].toFixed(1)} px, макс ${errs[errs.length - 1].toFixed(1)} px; по SGP4 ведутся ${bad.length}`;
   log(SATINFO.check);
+  if (w) log(`худший: ${w.name} — ${worst.e.toFixed(1)} px; оборотов/сут ${w.omm.MEAN_MOTION}, e ${w.omm.ECCENTRICITY}, MEAN_MOTION_DOT ${w.omm.MEAN_MOTION_DOT}, BSTAR ${w.omm.BSTAR}, эпоха ${w.omm.EPOCH}`);
 }
 async function loadSats() {
   const { fromOMM } = await import(`./orbit.js?v=${BUILD}`);
@@ -55,12 +64,12 @@ async function loadSats() {
     try {
       const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
       const d = await r.json(), list = [];
-      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, group: s.group, cube: !!s.cube, el }); } catch (e) { /* пропуск */ } }
+      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, group: s.group, cube: !!s.cube, el, omm: s.omm }); } catch (e) { /* пропуск */ } }
       const sat = R.setSats(list, d.groups || {});
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
       SATINFO.text = `${list.length} (известных ${sat.nCtx}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
       log('спутники:', u, list.length, 'шт., данные', d.generated);
-      setTimeout(() => checkSGP4(d.sats, fromOMM).catch((e) => log('сверка SGP4:', e.message)), 3000);
+      setTimeout(() => checkSGP4(list).catch((e) => log('сверка SGP4:', e.message)), 3000);
       return;
     } catch (e) { log('спутники: не взял', u, e.message); }
   }
@@ -324,7 +333,7 @@ async function start() {
   try {
     R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock });
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 2048 ? 2048 : 1024).then(() => log('текстуры Земли', R.tex.info, 'за', R.tex.ms.toFixed(0), 'мс'))
+    if (TEX) R.loadEarth(`tex/`, TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, 'за', R.tex.ms.toFixed(0), 'мс'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);

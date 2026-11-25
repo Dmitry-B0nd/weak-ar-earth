@@ -1,8 +1,8 @@
 Текстуры Земли
 
 earth-day-*.jpg  — NASA Visible Earth, «Blue Marble» (общественное достояние, NASA).
-earth-mix-*.jpg  — упакованные каналы: R — ночные огни (NASA «Earth at Night», общественное достояние),
-                   G — облака, B — маска воды.
+earth-night-*.jpg — ночные огни (NASA «Earth at Night», общественное достояние), серая.
+earth-mix-*.jpg  — упакованные каналы: G — облака, B — маска воды (R не используется).
 
 Исходные картинки взяты из примеров пакета three-globe (Vasco Asturiano, лицензия MIT,
 https://github.com/vasturiano/three-globe), уменьшены и перепакованы для лаборатории.

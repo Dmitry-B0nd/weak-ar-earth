@@ -109,8 +109,8 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.11';
-import { gmst, sunECI } from './orbit.js?v=0.11';
+import { createSats } from './sats.js?v=0.12';
+import { gmst, sunECI } from './orbit.js?v=0.12';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, ...o };   // солнце — в осях листа
@@ -138,10 +138,16 @@ export function createRenderer(canvas, o = {}) {
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb.i); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(es.idx), gl.STATIC_DRAW);
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic') || gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
   const tex = { day: null, mix: null, night: null, info: '', ms: 0 };
+  // текстура из файла: сначала запрос (чтобы видеть код ответа — 404 значит «файла нет на сайте»), потом картинка
   async function loadTex(url, gray) {
     const t0 = performance.now();
-    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = url;
-    await img.decode();
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+    const blob = await r.blob();
+    if (!/^image\//.test(blob.type)) throw new Error(`${url}: пришло не изображение (${blob.type || 'тип не указан'}, ${blob.size} байт)`);
+    const img = new Image(), src = URL.createObjectURL(blob); img.src = src;
+    try { await img.decode(); } catch (e) { URL.revokeObjectURL(src); throw new Error(`${url}: не раскодировалось (${blob.size} байт)`); }
+    URL.revokeObjectURL(src);
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     const fmt = gray ? gl.LUMINANCE : gl.RGB;                // серая — байт на точку в памяти видеокарты
@@ -153,11 +159,27 @@ export function createRenderer(canvas, o = {}) {
     tex.ms += performance.now() - t0;
     return { t, w: img.width, h: img.height };
   }
-  // загрузить текстуры Земли (размер дневной — 2048 или 1024)
-  async function loadEarth(base, size) {
+  // запасная текстура 1×1 (если огни или облака не загрузились — Земля всё равно с картой)
+  function tex1(rgb, gray) {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    const fmt = gray ? gl.LUMINANCE : gl.RGB;
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, fmt, 1, 1, 0, fmt, gl.UNSIGNED_BYTE, new Uint8Array(gray ? [rgb[0]] : rgb));
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return t;
+  }
+  // загрузить текстуры Земли (размер дневной — 2048 или 1024). Каждая отдельно: без дневной Земля остаётся простой,
+  // без огней или облаков — с картой, но без них; что не загрузилось и почему — в журнал.
+  async function loadEarth(base, size, log = () => {}) {
     const mixSize = size >= 2048 ? 1024 : 512;
-    const [d, n, m] = await Promise.all([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-night-${size}.jpg`, true), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
-    tex.day = d.t; tex.night = n.t; tex.mix = m.t; tex.info = `${d.w}×${d.h} + огни ${n.w}×${n.h} + ${m.w}×${m.h}`;
+    const res = await Promise.allSettled([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-night-${size}.jpg`, true), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
+    const fails = res.filter((r) => r.status === 'rejected').map((r) => r.reason && r.reason.message || String(r.reason));
+    fails.forEach((m) => log('текстура не загрузилась —', m));
+    if (res[0].status !== 'fulfilled') throw new Error(fails[0] || 'дневная текстура');
+    const d = res[0].value, nt = res[1].status === 'fulfilled' ? res[1].value : null, m = res[2].status === 'fulfilled' ? res[2].value : null;
+    tex.night = nt ? nt.t : tex1([0], true); tex.mix = m ? m.t : tex1([0, 0, 0]); tex.day = d.t;
+    tex.info = `${d.w}×${d.h}${nt ? ` + огни ${nt.w}×${nt.h}` : ' (без огней)'}${m ? ` + ${m.w}×${m.h}` : ' (без облаков)'}`;
   }
   // кольцо текстур с кадрами камеры
   const ring = [];
