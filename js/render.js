@@ -29,7 +29,7 @@ const VS_E = `attribute vec3 p; attribute vec2 uv; uniform mat4 P; uniform mat4 
 void main(){ vuv = uv; vec4 q = MV * vec4(p, 1.0); vp = q.xyz; vn = mat3(MV) * p; gl_Position = P * q; }`;
 const FS_E = `precision mediump float;
 varying vec2 vuv; varying vec3 vn; varying vec3 vp;
-uniform sampler2D tDay; uniform sampler2D tMix; uniform vec3 sun; uniform float cloudU;
+uniform sampler2D tDay; uniform sampler2D tMix; uniform sampler2D tNight; uniform vec3 sun; uniform float cloudU;
 void main(){
   vec3 n = normalize(vn), v = normalize(-vp);
   float ndl = dot(n, sun);
@@ -42,7 +42,8 @@ void main(){
   vec3 h = normalize(sun + v);
   col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
   col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
-  col += vec3(1.0, 0.78, 0.45) * mx.r * (1.0 - dayF) * (1.0 - cl * 0.8) * 1.1;
+  float lights = max(texture2D(tNight, vuv).r - 0.03, 0.0) * 1.15;   // срез: шум сжатия на тёмном не светится
+  col += vec3(1.0, 0.78, 0.45) * lights * (1.0 - dayF) * (1.0 - cl * 0.8);
   float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
   gl_FragColor = vec4(col, 1.0);
@@ -108,8 +109,11 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
+import { createSats } from './sats.js?v=0.11';
+import { gmst, sunECI } from './orbit.js?v=0.11';
+
 export function createRenderer(canvas, o = {}) {
-  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, ...o };   // солнце — в осях листа
+  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, ...o };   // солнце — в осях листа
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false, depth: true, powerPreference: 'low-power', preserveDrawingBuffer: false, desynchronized: false });
   if (!gl) throw new Error('WebGL недоступен');
   const pBg = prog(gl, VS_BG, FS_BG), pM = prog(gl, VS_M, FS_M);
@@ -122,6 +126,9 @@ export function createRenderer(canvas, o = {}) {
     return b;
   };
   const earth = mesh(sphere(0.45, -0.55)), frame = mesh(frameMesh(0.02));
+  // спутники: задаются позже (данные грузятся), положения считает видеокарта
+  let sats = null;
+  function setSats(list, groups) { sats = createSats(gl, list, groups); return sats; }
   // Земля с текстурами
   const pE = prog(gl, VS_E, FS_E), pH = prog(gl, VS_E, FS_H);
   const es = earthSphere();
@@ -130,14 +137,15 @@ export function createRenderer(canvas, o = {}) {
   gl.bindBuffer(gl.ARRAY_BUFFER, eb.uv); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(es.uv), gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb.i); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(es.idx), gl.STATIC_DRAW);
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic') || gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
-  const tex = { day: null, mix: null, info: '', ms: 0 };
-  async function loadTex(url) {
+  const tex = { day: null, mix: null, night: null, info: '', ms: 0 };
+  async function loadTex(url, gray) {
     const t0 = performance.now();
     const img = new Image(); img.crossOrigin = 'anonymous'; img.src = url;
     await img.decode();
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+    const fmt = gray ? gl.LUMINANCE : gl.RGB;                // серая — байт на точку в памяти видеокарты
+    gl.texImage2D(gl.TEXTURE_2D, 0, fmt, fmt, gl.UNSIGNED_BYTE, img);
     gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -148,8 +156,8 @@ export function createRenderer(canvas, o = {}) {
   // загрузить текстуры Земли (размер дневной — 2048 или 1024)
   async function loadEarth(base, size) {
     const mixSize = size >= 2048 ? 1024 : 512;
-    const [d, m] = await Promise.all([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
-    tex.day = d.t; tex.mix = m.t; tex.info = `${d.w}×${d.h} + ${m.w}×${m.h}`;
+    const [d, n, m] = await Promise.all([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-night-${size}.jpg`, true), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
+    tex.day = d.t; tex.night = n.t; tex.mix = m.t; tex.info = `${d.w}×${d.h} + огни ${n.w}×${n.h} + ${m.w}×${m.h}`;
   }
   // кольцо текстур с кадрами камеры
   const ring = [];
@@ -212,17 +220,30 @@ export function createRenderer(canvas, o = {}) {
     };
     if (opt.frame) drawMesh(frame, [1.0, 0.8, 0.1, 1], 0);
     gl.disableVertexAttribArray(lp); gl.disableVertexAttribArray(ln);
+    // время: модельные часы (opt.clock) — Земля по звёздному времени, Солнце по дате; без часов — как раньше
+    const wall = performance.now(), ck = opt.clock ? opt.clock() : null;
+    const spinNow = ck ? gmst(ck.t) : wall / 1000 * 2 * Math.PI / opt.dayLen;
+    const E0 = earthModel(0);
+    const ax = (k) => norm3([E0[k], E0[k + 1], E0[k + 2]]);
+    const EX = ax(0), EY = ax(4), EZ = ax(8);
+    const sunE = ck ? sunECI(ck.t) : null;                    // Солнце в осях Земли (ECI)
+    const sunB0 = sunE ? [0, 1, 2].map((i) => EX[i] * sunE[0] + EY[i] * sunE[1] + EZ[i] * sunE[2]) : norm3(opt.sun);
+    const drawSats = () => {
+      if (!sats || !ck) return;
+      sats.draw(ck.t, wall, ck.speed, P, mul4(M, E0), sunE, s * f, [cw, ch], dpr);
+    };
     if (!tex.day) {
       gl.useProgram(pM); gl.enableVertexAttribArray(lp); gl.enableVertexAttribArray(ln);
       drawMesh(earth, [0.15, 0.4, 0.8, 1], 1);
       gl.disableVertexAttribArray(lp); gl.disableVertexAttribArray(ln);
+      drawSats();
       return;
     }
     // модель Земли: центр на 0,55 над листом, радиус 0,45; ось наклонена на 23,4°, суточное вращение
-    const tsec = performance.now() / 1000, spin = tsec * 2 * Math.PI / opt.dayLen;
-    const E = earthModel(spin);
-    const MV = mul4(M, E), MVh = mul4(M, earthModel(spin, 1.06));
-    const sunB = norm3(opt.sun), sunC = [R[0] * sunB[0] + R[1] * sunB[1] + R[2] * sunB[2], R[3] * sunB[0] + R[4] * sunB[1] + R[5] * sunB[2], R[6] * sunB[0] + R[7] * sunB[1] + R[8] * sunB[2]];
+    const tsec = wall / 1000;
+    const E = earthModel(spinNow);
+    const MV = mul4(M, E), MVh = mul4(M, earthModel(spinNow, 1.06));
+    const sunB = sunB0, sunC = [R[0] * sunB[0] + R[1] * sunB[1] + R[2] * sunB[2], R[3] * sunB[0] + R[4] * sunB[1] + R[5] * sunB[2], R[6] * sunB[0] + R[7] * sunB[1] + R[8] * sunB[2]];
     const bindE = (pr) => {
       gl.useProgram(pr);
       gl.uniformMatrix4fv(gl.getUniformLocation(pr, 'P'), false, P);
@@ -237,9 +258,12 @@ export function createRenderer(canvas, o = {}) {
     gl.uniformMatrix4fv(gl.getUniformLocation(pE, 'MV'), false, MV);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex.day); gl.uniform1i(gl.getUniformLocation(pE, 'tDay'), 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex.mix); gl.uniform1i(gl.getUniformLocation(pE, 'tMix'), 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tex.night); gl.uniform1i(gl.getUniformLocation(pE, 'tNight'), 2);
     gl.uniform1f(gl.getUniformLocation(pE, 'cloudU'), (tsec / opt.cloudLen) % 1);
     gl.drawElements(gl.TRIANGLES, eb.count, gl.UNSIGNED_SHORT, 0);
+    gl.activeTexture(gl.TEXTURE0);
     off();
+    drawSats();
     // ореол: задние грани сферы побольше, складывается со светом, глубину не пишет
     if (opt.halo) {
       off = bindE(pH);
@@ -260,5 +284,5 @@ export function createRenderer(canvas, o = {}) {
     const X = X0.map((v, i) => v * c + Y0[i] * s), Y = Y0.map((v, i) => -X0[i] * s + v * c);
     return [X[0] * r, X[1] * r, X[2] * r, 0, Y[0] * r, Y[1] * r, Y[2] * r, 0, Z[0] * r, Z[1] * r, Z[2] * r, 0, 0, 0, -0.55, 1];
   }
-  return { gl, upload, draw, ring, setDpr(d) { dpr = d; }, loadEarth, tex, opt };
+  return { gl, upload, draw, ring, setDpr(d) { dpr = d; }, loadEarth, tex, opt, setSats, get sats() { return sats; } };
 }
