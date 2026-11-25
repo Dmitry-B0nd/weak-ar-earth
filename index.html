@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Лаборатория AR</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; font-family: system-ui, sans-serif; }
+  #gl { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #video { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #panel { position: fixed; left: 0; top: 0; right: 0; margin: 0; padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top));
+    font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; color: #eee; background: rgba(0,0,0,.55); white-space: pre-wrap; pointer-events: none; }
+  #panel.off { display: none; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap;
+    padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+  button { font-size: 14px; padding: 10px 12px; border: 0; border-radius: 8px; background: rgba(255,255,255,.85); color: #000; }
+  #start { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 20px; padding: 16px 28px; background: #ffd23f; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<video id="video" playsinline muted></video>
+<pre id="panel"></pre>
+<button id="start">Старт</button>
+<div id="bar">
+  <button id="save">Сохранить запись</button>
+  <button id="clear">Очистить</button>
+  <button id="vid">Видео 10 с</button>
+  <button id="hide">Панель</button>
+</div>
+<script type="module" src="js/main.js?v=0.2"></script>
+</body>
+</html>
