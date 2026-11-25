@@ -2,17 +2,17 @@
 //   слежение — края меток около предсказанного положения листа, полное разрешение;
 //   поиск (только когда лист потерян) — js-aruco2 на уменьшенной вдвое картинке, затем то же уточнение краями.
 // На выходе — гомография «лист → пиксели кадра», углы подтверждённых меток и поза листа.
-import { AR, CV } from '../vendor/aruco.mjs?v=0.4';
-import { createTracker, hFrom4, cornersOf } from './track.js?v=0.4';
-import { createPoseEstimator } from './pose.js?v=0.4';
-import { createCoarse } from './coarse.js?v=0.4';
-import { tagCorners } from './board.js?v=0.4';
-import { applyH, fitH } from './geom.js?v=0.4';
+import { AR, CV } from '../vendor/aruco.mjs?v=0.5';
+import { createTracker, hFrom4, cornersOf } from './track.js?v=0.5';
+import { createPoseEstimator } from './pose.js?v=0.5';
+import { createCoarse } from './coarse.js?v=0.5';
+import { tagCorners } from './board.js?v=0.5';
+import { applyH, fitH } from './geom.js?v=0.5';
 
 const now = () => performance.now();
 
 export function createVision(o = {}) {
-  const opt = { predict: 0.8, acqScale: 2, blurMax: 8, minScore: 0.5, ...o };
+  const opt = { predict: 0.8, acqScale: 2, blurMax: 8, minScore: 0.5, oneHeavy: false, ...o };
   const T = createTracker({ stable: !!o.stableEdges });
   const C = createCoarse();
   const P = createPoseEstimator();
@@ -124,7 +124,10 @@ export function createVision(o = {}) {
         }
       } else why += `; грубо: ${c ? 'сходство ' + c.score.toFixed(2) : 'нет'}`;
     }
-    if (!r) {
+    // Поиск меток с нуля — только если в этом кадре не было грубого поиска: иначе один кадр стоил 50–120 мс
+    // (при 30 к/с это пропуск кадров и заметный фриз показа). Тогда поиск — на следующем кадре, по всему кадру.
+    if (!r && coarseMs > 0 && opt.oneHeavy) { failed = true; }
+    else if (!r) {
       const ta = now();
       const a = acquire(g, gw, gh, ox, oy);
       if (a && a.tags >= 1) {

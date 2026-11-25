@@ -1,6 +1,6 @@
 // Поза листа: (1) оценка по одному распознаванию — в фоновом потоке; (2) сглаживание поворота и показ
 // кадров между распознаваниями — в главном потоке. Без датчиков, без прогнозов, без переключения режимов.
-import { poseFromH, flipPose, refinePose, quatFromR, rFromQuat, slerp, quatAngle, angleBetween, project } from './geom.js?v=0.4';
+import { poseFromH, flipPose, refinePose, quatFromR, rFromQuat, slerp, quatAngle, angleBetween, project } from './geom.js?v=0.5';
 
 // ---------- (1) оценка позы по распознаванию ----------
 export function createPoseEstimator(o = {}) {
@@ -63,15 +63,21 @@ export function createPoseTrack(o = {}) {
     hold: 0,                   // мс: сколько можно показывать последнюю позу после неё (без следующей)
     gap: 130,                  // мс: самый длинный промежуток между позами, через который делаем переход
     reset: 300,                // мс без поз — фильтр поворота начинает заново
+    // при быстром движении (углы листа между двумя позами сдвинулись больше fastPx) переход — только через короткий
+    // промежуток (fastGap мс): путь листа при рывке не прямой, и середина длинного перехода ложится мимо листа
+    fastPx: 25, fastGapK: 2.2,      // fastGap = fastGapK × обычный промежуток между позами (≈ кадр камеры)
     ...o,
   };
   const list = [];             // [{ tf, q, t }]
   let flt = null;              // { tf, q, vr, px, vi }
+  let dtAvg = 50;              // обычный промежуток между позами, мс
   function add(tf, R, t, px) {
     const q = quatFromR(R);
     if (!flt || tf - flt.tf > opt.reset || tf <= flt.tf) { flt = { tf, q, vr: 0, px, vi: 1e3 }; list.length = 0; }
     else {
       const dt = (tf - flt.tf) / 1000;
+      if (dt * 1000 < 1.5 * dtAvg) dtAvg += (dt * 1000 - dtAvg) * 0.05;   // только соседние позы, без пропусков
+      else dtAvg *= 1.002;                                               // медленно вверх, если камера стала реже
       const sr = quatAngle(q, flt.q) * 57.2958 / dt;
       flt.vr += (sr - flt.vr) * alphaF(opt.dcut, dt);
       let fc = opt.minRot + opt.betaRot * flt.vr;
@@ -83,7 +89,7 @@ export function createPoseTrack(o = {}) {
       flt.q = slerp(flt.q, q, alphaF(fc, dt));
       flt.tf = tf; flt.px = px;
     }
-    list.push({ tf, q: flt.q, t: t.slice() });
+    list.push({ tf, q: flt.q, t: t.slice(), px });
     if (list.length > 40) list.shift();
   }
   // поза для кадра tf: { R, t } или null (сцену не показывать)
@@ -91,7 +97,9 @@ export function createPoseTrack(o = {}) {
     let a = null, b = null;
     for (let i = list.length - 1; i >= 0; i--) { if (list[i].tf > tf + 0.5) { b = list[i]; continue; } a = list[i]; break; }
     if (a && tf - a.tf <= 0.5) return { R: rFromQuat(a.q), t: a.t };          // поза этого самого кадра
-    if (a && b && b.tf - a.tf <= opt.gap) {
+    let fast = false;
+    if (a && b && a.px && b.px) { let m = 0; for (let i = 0; i < 8; i += 2) m = Math.max(m, Math.hypot(b.px[i] - a.px[i], b.px[i + 1] - a.px[i + 1])); fast = m > opt.fastPx; }
+    if (a && b && b.tf - a.tf <= (fast ? Math.min(opt.gap, opt.fastGapK * dtAvg) : opt.gap)) {
       const w = (tf - a.tf) / Math.max(1, b.tf - a.tf);
       return { R: rFromQuat(slerp(a.q, b.q, w)), t: [0, 1, 2].map((i) => a.t[i] + (b.t[i] - a.t[i]) * w) };
     }

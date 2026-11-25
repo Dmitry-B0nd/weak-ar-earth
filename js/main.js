@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.4';
-import { createRenderer } from './render.js?v=0.4';
-import { createPoseTrack } from './pose.js?v=0.4';
+import { BUILD } from './build.js?v=0.5';
+import { createRenderer } from './render.js?v=0.5';
+import { createPoseTrack } from './pose.js?v=0.5';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -10,11 +10,14 @@ const Q = new URLSearchParams(location.search);
 let CAP = Q.get('cap') || ('MediaStreamTrackProcessor' in window ? 'vf' : 'bitmap');
 const CAMW = +Q.get('w') || 640, CAMH = +Q.get('h') || 480, CAMFPS = +Q.get('fps') || 30;
 const FOV = +Q.get('fov') || 66;                          // угол обзора по длинной стороне (не измерен — принят)
-const MAXDELAY = 160;
-// Опыты (выбираются один раз адресом): ?edge=stable — устойчивый набор краёв; ?exp=N — короткая выдержка, N в единицах
-// 100 мкс (как в стандарте; 80 = 8 мс), если камера это умеет.
+const MAXDELAY = 160;                                     // мс: дольше кадр не ждёт своей позы
+// Опыт (выбирается один раз адресом): ?edge=stable — устойчивый набор краёв (не помог, оставлен для сравнения).
 const VOPT = { stableEdges: Q.get('edge') === 'stable' };
-const EXP = +Q.get('exp') || 0;                                     // мс: дольше кадр не ждёт своей позы
+// Короткая выдержка (8 мс): если камера разрешает ручную выдержку — по умолчанию (меньше смаз при рывках, выше частота
+// кадров). ?exp=0 — оставить автоматику камеры; ?exp=N — своя выдержка, N в единицах 100 мкс.
+const EXPQ = Q.get('exp');
+let EXP = EXPQ === null ? 80 : +EXPQ || 0;
+let camReady = true;                                        // пока выдержка ставится — картинку не показываем
 
 const $ = (id) => document.getElementById(id);
 const panel = $('panel'), canvas = $('gl'), video = $('video');
@@ -24,7 +27,7 @@ const LOGS = [];
 let R = null, worker = null, stream = null, track = null;
 let vw = 0, vh = 0, f0 = 0;
 const T = createPoseTrack();
-const REC = { frames: [], det: [] }; const RECMAX = 40000;
+const REC = { frames: [], det: [], show: [] }; const RECMAX = 40000;
 const S = {                                               // счётчики для панели
   frames: 0, raf: 0, res: 0, track: 0, blur: 0, acq: 0, none: 0, coarseMs: 0, visMs: 0, grabMs: 0, acqMs: 0, poseMs: 0, mainGrab: 0, sent: 0,
   shown: 0, hidden: 0, delay: 0, draws: 0, lastRes: null, fmt: '', roi: '', camDt: [], maxGap: 0, lastShowT: 0, errs: 0,
@@ -48,13 +51,15 @@ async function openCamera() {
     CAPS = c;
     log('камера умеет:', ['exposureMode', 'exposureTime', 'exposureCompensation', 'iso', 'focusMode', 'frameRate', 'torch'].map(pick).filter(Boolean).join('; ') || 'ничего не сообщает');
   } catch (e) { log('getCapabilities:', e.message); }
-  if (EXP) setExposure(EXP);                                   // в фоне: кадры уже идут
+  const canExp = CAPS && CAPS.exposureTime && Array.isArray(CAPS.exposureMode) && CAPS.exposureMode.includes('manual');
+  if (EXP && !canExp) { log('ручной выдержки камера не даёт — оставляю автоматику'); EXP = 0; }
+  if (EXP) { camReady = false; setExposure(EXP).finally(() => setTimeout(() => { camReady = true; }, 250)); }   // в фоне: кадры уже идут
 }
 // Ручная выдержка (опыт ?exp=N, N в единицах 100 мкс: 80 = 8 мс). Чтобы картинка не потемнела, светочувствительность
 // поднимается во столько же раз, во сколько укоротилась выдержка (в пределах того, что разрешает камера).
 async function setExposure(E) {
   try {
-    await new Promise((r) => setTimeout(r, 1500));          // дать автоматике выставить свет
+    await new Promise((r) => setTimeout(r, 1200));          // дать автоматике выставить свет (картинка пока скрыта)
     const c = track.getCapabilities ? track.getCapabilities() : {}, st0 = track.getSettings();
     const e0 = st0.exposureTime, i0 = st0.iso;
     const adv = { exposureMode: 'manual', exposureTime: E };
@@ -191,7 +196,8 @@ function loop(now) {
   visible = !!pose;
   if (pose) S.shown++; else S.hidden++;
   S.delay += now - pick.ta; S.draws++;
-  R.draw(pick, pose, f0);
+  R.draw(pick, camReady ? pose : null, f0, !camReady);
+  if (REC.show.length < RECMAX) REC.show.push([Math.round(now), +pick.tf.toFixed(1), pose ? 1 : 0]);
 }
 
 // ---------- панель ----------
@@ -206,7 +212,7 @@ function panelTick() {
   const sheetPx = m.H ? Math.hypot(...[0, 1].map((k) => { const h = m.H; const p = (x, y) => [(h[0] * x + h[1] * y + h[2]) / (h[6] * x + h[7] * y + h[8]), (h[3] * x + h[4] * y + h[5]) / (h[6] * x + h[7] * y + h[8])]; return p(1, 0.5)[k] - p(0, 0.5)[k]; })) : 0;
   const L = T.last, dist = L ? Math.hypot(...L.t) : 0;
   const set = track && track.getSettings ? track.getSettings() : {};
-  panel.textContent =
+  panel.textContent = (camReady ? '' : 'настраиваю камеру…\n') +
     `сборка ${BUILD} · захват ${CAP === 'vf' ? 'кадр камеры' : 'картинка'} (${S.fmt || '…'})${VOPT.stableEdges ? ' · края: устойч.' : ''}${EXP ? ' · выдержка ' + ((track && track.getSettings && track.getSettings().exposureMode === 'manual') ? (track.getSettings().exposureTime / 10).toFixed(1) + ' мс, iso ' + track.getSettings().iso : 'не задана') : ''}\n` +
     `камера ${vw}×${vh}, заказ ${CAMFPS} к/с (${set.frameRate ? set.frameRate.toFixed(0) : '?'}), факт ${(d('frames') / dt).toFixed(1)} к/с, интервал ${med.toFixed(0)} мс\n` +
     `зрение ${(d('res') / dt).toFixed(1)}/с: след ${d('track')} смаз ${d('blur')} поиск ${d('acq')} нет ${d('none')} · участок ${S.roi}\n` +
@@ -223,7 +229,7 @@ function recordJSON() {
   return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, exp: EXP }, caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
-    raw: { frames: REC.frames, det: REC.det, o: [], m: [] } });
+    raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });
 }
 async function shareFile(name, blob, type) {
   const file = new File([blob], name, { type });
@@ -235,7 +241,7 @@ async function saveRecord() {
   const name = `lab-${BUILD}-${new Date().toISOString().slice(5, 19).replace(/[:T]/g, '-')}.json`;
   await shareFile(name, new Blob([recordJSON()], { type: 'application/json' }), 'application/json');
 }
-function clearRecord() { REC.frames.length = 0; REC.det.length = 0; log('запись очищена'); }
+function clearRecord() { REC.frames.length = 0; REC.det.length = 0; REC.show.length = 0; log('запись очищена'); }
 // видео с камеры (для разбора кадров у себя): 10 с
 async function recordVideo(btn) {
   if (!window.MediaRecorder) { log('MediaRecorder недоступен'); return; }

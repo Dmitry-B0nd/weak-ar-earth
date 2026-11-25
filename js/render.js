@@ -96,12 +96,12 @@ export function createRenderer(canvas, o = {}) {
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   }
   // кадр + сцена. slot — запись кольца; pose — { R, t } или null; f — фокус кадра в пикселях
-  function draw(slot, pose, f) {
+  function draw(slot, pose, f, blank) {
     resize();
     const cw = canvas.width, ch = canvas.height;
     gl.viewport(0, 0, cw, ch);
     gl.disable(gl.DEPTH_TEST);
-    if (!slot || slot.n < 0) { gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+    if (!slot || slot.n < 0 || blank) { gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
     const vw = slot.w, vh = slot.h, s = Math.max(cw / vw, ch / vh);
     const fw = cw / s / vw, fh = ch / s / vh;                 // видимая доля кадра
     gl.useProgram(pBg);
