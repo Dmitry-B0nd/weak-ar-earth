@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.3';
-import { createRenderer } from './render.js?v=0.3';
-import { createPoseTrack } from './pose.js?v=0.3';
+import { BUILD } from './build.js?v=0.4';
+import { createRenderer } from './render.js?v=0.4';
+import { createPoseTrack } from './pose.js?v=0.4';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -48,13 +48,22 @@ async function openCamera() {
     CAPS = c;
     log('камера умеет:', ['exposureMode', 'exposureTime', 'exposureCompensation', 'iso', 'focusMode', 'frameRate', 'torch'].map(pick).filter(Boolean).join('; ') || 'ничего не сообщает');
   } catch (e) { log('getCapabilities:', e.message); }
-  if (EXP) {
-    try {
-      await track.applyConstraints({ advanced: [{ exposureMode: 'manual', exposureTime: EXP }] });
-      const st = track.getSettings();
-      log('выдержка: просили', EXP, '→ стоит', st.exposureMode, st.exposureTime, 'iso', st.iso);
-    } catch (e) { log('выдержку задать не вышло:', e.message); }
-  }
+  if (EXP) setExposure(EXP);                                   // в фоне: кадры уже идут
+}
+// Ручная выдержка (опыт ?exp=N, N в единицах 100 мкс: 80 = 8 мс). Чтобы картинка не потемнела, светочувствительность
+// поднимается во столько же раз, во сколько укоротилась выдержка (в пределах того, что разрешает камера).
+async function setExposure(E) {
+  try {
+    await new Promise((r) => setTimeout(r, 1500));          // дать автоматике выставить свет
+    const c = track.getCapabilities ? track.getCapabilities() : {}, st0 = track.getSettings();
+    const e0 = st0.exposureTime, i0 = st0.iso;
+    const adv = { exposureMode: 'manual', exposureTime: E };
+    if (c.iso && e0 && i0) adv.iso = Math.round(Math.min(c.iso.max, Math.max(c.iso.min, i0 * e0 / E)));
+    await track.applyConstraints({ advanced: [adv] });
+    if (CAMFPS > 20) await track.applyConstraints({ frameRate: { ideal: CAMFPS } }).catch(() => {});
+    const st = track.getSettings();
+    log('выдержка: была', e0, 'iso', i0, '→ просили', E, 'iso', adv.iso, '→ стоит', st.exposureMode, st.exposureTime, 'iso', st.iso, 'к/с', st.frameRate);
+  } catch (e) { log('выдержку задать не вышло:', e.message); }
 }
 let CAPS = null;
 function setSize(w, h) {
@@ -198,7 +207,7 @@ function panelTick() {
   const L = T.last, dist = L ? Math.hypot(...L.t) : 0;
   const set = track && track.getSettings ? track.getSettings() : {};
   panel.textContent =
-    `сборка ${BUILD} · захват ${CAP === 'vf' ? 'кадр камеры' : 'картинка'} (${S.fmt || '…'})${VOPT.stableEdges ? ' · края: устойч.' : ''}${EXP ? ' · выдержка ' + ((track && track.getSettings && track.getSettings().exposureTime) ?? 'не задана') : ''}\n` +
+    `сборка ${BUILD} · захват ${CAP === 'vf' ? 'кадр камеры' : 'картинка'} (${S.fmt || '…'})${VOPT.stableEdges ? ' · края: устойч.' : ''}${EXP ? ' · выдержка ' + ((track && track.getSettings && track.getSettings().exposureMode === 'manual') ? (track.getSettings().exposureTime / 10).toFixed(1) + ' мс, iso ' + track.getSettings().iso : 'не задана') : ''}\n` +
     `камера ${vw}×${vh}, заказ ${CAMFPS} к/с (${set.frameRate ? set.frameRate.toFixed(0) : '?'}), факт ${(d('frames') / dt).toFixed(1)} к/с, интервал ${med.toFixed(0)} мс\n` +
     `зрение ${(d('res') / dt).toFixed(1)}/с: след ${d('track')} смаз ${d('blur')} поиск ${d('acq')} нет ${d('none')} · участок ${S.roi}\n` +
     `  поток ${(d('visMs') / res).toFixed(1)} мс (захват ${(d('grabMs') / res).toFixed(1)}, грубо ${(d('coarseMs') / res).toFixed(1)}, поиск ${(d('acqMs') / res).toFixed(1)}, поза ${(d('poseMs') / res).toFixed(1)}), главный ${(d('mainGrab') / Math.max(1, d('sent'))).toFixed(1)} мс\n` +

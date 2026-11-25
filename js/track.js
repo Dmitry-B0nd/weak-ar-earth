@@ -1,8 +1,8 @@
 // Слежение за листом по известному рисунку: края клеток всех меток ищутся в полном разрешении вдоль нормали
 // около предсказанного положения, по ним уточняется гомография «лист → пиксели» (8 чисел, через 4 угла листа).
 // Проверка: по найденной гомографии читаются клетки меток; лист принят, если коды совпали.
-import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.3';
-import { applyH, solveSPD } from './geom.js?v=0.3';
+import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.4';
+import { applyH, solveSPD } from './geom.js?v=0.4';
 
 const SHEET = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
@@ -25,7 +25,7 @@ export const cornersOf = (H) => { const o = []; for (const [x, y] of SHEET) o.pu
 export function createTracker(o = {}) {
   // stable — опыт 0.3 (?edge=stable): вес края плавно зависит от размера клетки вдоль нормали (вместо жёсткого
   // порога), масштаб невязок сглаживается между кадрами. Цель — чтобы набор краёв не скакал от кадра к кадру.
-  const opt = { tukey: 4.685, minSigma: 0.35, stable: false, ...o };
+  const opt = { tukey: 4.685, minSigma: 0.35, stable: false, innerWin: 0.8, maxPasses: 5, outerFirst: 5, relax: 0.5, fitIters: 3, stopMove: 0.15, ...o };
   let sigPrev = 0;
   const E = buildEdges();
   const N = E.length;
@@ -44,11 +44,12 @@ export function createTracker(o = {}) {
 
   // поиск края для всех точек; R — полуширина поиска (px), inner — и внутренние края клеток
   const prof = new Float64Array(64);
-  const rej = new Int32Array(6);       // почему край не взят: мелко, вне кадра, слабый, на краю окна, два края, слабее других
+  const rej = new Int32Array(6);
+  const why = new Int8Array(N);      // для отладки: −1 не искали, 0 взят, 1…6 — причина отказа       // почему край не взят: мелко, вне кадра, слабый, на краю окна, два края, слабее других
   function search(H, R, inner) {
     let cnt = 0;
     const strs = [];
-    rej.fill(0);
+    rej.fill(0); why.fill(-1);
     for (let i = 0; i < N; i++) {
       ok[i] = 0;
       const e = E[i];
@@ -59,25 +60,29 @@ export function createTracker(o = {}) {
       if (opt.stable) {
         // вес по размеру клетки: наружные края — от 2 до 3,5 px, внутренние — от 3,5 до 5,5 px
         gwt[i] = e.outer ? Math.min(1, Math.max(0, (cell - 2) / 1.5)) : Math.min(1, Math.max(0, (cell - 3.5) / 2));
-        if (!(gwt[i] > 0)) { rej[0]++; continue; }
-      } else if (!(cell > (e.outer ? 1.6 : 2.6))) { rej[0]++; continue; }  // слишком мелко
+        if (!(gwt[i] > 0)) { rej[0]++; why[i] = 1; continue; }
+      } else if (!(cell > (e.outer ? 1.6 : 2.6))) { rej[0]++; why[i] = 1; continue; }  // слишком мелко
       dx /= cell; dy /= cell;
       // окно: для наружных краёв — R; для внутренних — около половины клетки, но не меньше ±2 px
       // (одноимённый соседний край не ближе двух клеток, а при ±1 px край на границе окна терял долю пикселя)
-      const r = e.outer ? Math.max(2, R | 0) : Math.max(2, Math.min(R, Math.round(0.45 * cell)));
+      // Наружный край: внутри метки одноимённый край (тёмная клетка → белая) не ближе 2 клеток, снаружи — 2,7 клетки;
+      // поэтому окно не шире 1,5 клетки ВДОЛЬ НОРМАЛИ этого края (под наклоном клетка вдоль сжатия — всего 3 px).
+      // Внутренний край: одноимённый соседний край не ближе 2 клеток, а края обратного перепада отсекает знак —
+      // поэтому окно до 0,8 клетки (узкое окно не вытягивало ошибку дальнего края листа под наклоном).
+      const r = e.outer ? Math.max(2, Math.min(R | 0, Math.round(1.5 * cell))) : Math.max(2, Math.min(R, Math.round(opt.innerWin * cell)));
       // профиль яркости вдоль нормали: от −r−1 до r+1
       let bad = false;
       for (let s = -r - 1, k = 0; s <= r + 1; s++, k++) { const v = pix(p[0] + s * dx, p[1] + s * dy); if (v < 0) { bad = true; break; } prof[k] = v; }
-      if (bad) { rej[1]++; continue; }
+      if (bad) { rej[1]++; why[i] = 2; continue; }
       // производная (от тёмного к светлому — положительная), максимум
       let best = -1e9, bs = 0, second = -1e9;
       for (let s = -r, k = 1; s <= r; s++, k++) {
         const d = (prof[k + 1] - prof[k - 1]) * 0.5;
         if (d > best) { if (Math.abs(s - bs) > 2) second = Math.max(second, best); best = d; bs = s; } else if (Math.abs(s - bs) > 2 && d > second) second = d;
       }
-      if (!(best > 3)) { rej[2]++; continue; }
-      if (bs === -r || bs === r) { rej[3]++; continue; }   // максимум на краю окна — настоящий край может быть дальше
-      if (second > 0.75 * best) { rej[4]++; continue; }   // два похожих края — не знаем, какой наш
+      if (!(best > 3)) { rej[2]++; why[i] = 3; continue; }
+      if (bs === -r || bs === r) { rej[3]++; why[i] = 4; continue; }   // максимум на краю окна — настоящий край может быть дальше
+      if (second > 0.75 * best) { rej[4]++; why[i] = 5; continue; }   // два похожих края — не знаем, какой наш
       // доля пикселя: парабола по соседям
       const k = bs + r + 1;
       let off = 0;
@@ -87,14 +92,14 @@ export function createTracker(o = {}) {
         if (den < 0) off = Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den));
       }
       const s = bs + off;
-      mu[i] = p[0] + s * dx; mv[i] = p[1] + s * dy; nu[i] = dx; nv[i] = dy; str[i] = best; ok[i] = 1;
+      mu[i] = p[0] + s * dx; mv[i] = p[1] + s * dy; nu[i] = dx; nv[i] = dy; str[i] = best; ok[i] = 1; why[i] = 0;
       strs.push(best); cnt++;
     }
     // слабые края (меньше трети типичного) — не края, а шум
     if (cnt > 8) {
       strs.sort((a, b) => a - b);
       const thr = strs[strs.length >> 1] * 0.33;
-      for (let i = 0; i < N; i++) if (ok[i] && str[i] < thr) { ok[i] = 0; cnt--; rej[5]++; }
+      for (let i = 0; i < N; i++) if (ok[i] && str[i] < thr) { ok[i] = 0; cnt--; rej[5]++; why[i] = 6; }
     }
     return cnt;
   }
@@ -159,33 +164,36 @@ export function createTracker(o = {}) {
       out[i] = ((H[0] * e.bx + H[1] * e.by + H[2]) / z - mu[i]) * nu[i] + ((H[3] * e.bx + H[4] * e.by + H[5]) / z - mv[i]) * nv[i];
     }
   }
-  // уточнение: устойчивый МНК (веса Тьюки) по 8 элементам гомографии в нормированных координатах кадра
-  const absr = new Float64Array(N);
+  // уточнение: устойчивый МНК (веса Тьюки) по 8 элементам гомографии в нормированных координатах кадра.
+  // Шаг — по Левенбергу — Марквардту: принимается, только если устойчивая ошибка уменьшилась, иначе шаг короче.
+  // (Простой шаг Гаусса — Ньютона под наклоном раскачивался: дальний край листа перескакивал верное положение.)
+  const absr = new Float64Array(N), r1 = new Float64Array(N);
   function fit(H0, iters) {
-    // нормировка: начало — центр листа, масштаб 1/100 px (для обусловленности)
     const c = applyH(H0, 0.5, 0.5), S = 100, cx = c[0], cy = c[1];
     let h = [(H0[0] - cx * H0[6]) / S, (H0[1] - cx * H0[7]) / S, (H0[2] - cx * H0[8]) / S, (H0[3] - cy * H0[6]) / S, (H0[4] - cy * H0[7]) / S, (H0[5] - cy * H0[8]) / S, H0[6], H0[7], H0[8]];
     h = h.map((v) => v / h[8]);
     const toPx = (h) => { const H = [S * h[0] + cx * h[6], S * h[1] + cx * h[7], S * h[2] + cx * h[8], S * h[3] + cy * h[6], S * h[4] + cy * h[7], S * h[5] + cy * h[8], h[6], h[7], h[8]]; return H.map((v) => v / H[8]); };
-    let sigma = 1;
-    const A = new Float64Array(64), b = new Float64Array(8), j = new Float64Array(8);
-    for (let it = 0; it < iters; it++) {
-      // невязки (px) и масштаб (MAD) — на первых двух шагах
-      let k = 0;
+    const residAll = (h, out) => {
       for (let i = 0; i < N; i++) {
         if (!ok[i]) continue;
         const e = E[i], w = h[6] * e.bx + h[7] * e.by + 1;
-        const u = (h[0] * e.bx + h[1] * e.by + h[2]) / w, v = (h[3] * e.bx + h[4] * e.by + h[5]) / w;
-        res[i] = (S * u + cx - mu[i]) * nu[i] + (S * v + cy - mv[i]) * nv[i];
-        if (it < 2) absr[k++] = Math.abs(res[i]);
+        out[i] = (S * (h[0] * e.bx + h[1] * e.by + h[2]) / w + cx - mu[i]) * nu[i] + (S * (h[3] * e.bx + h[4] * e.by + h[5]) / w + cy - mv[i]) * nv[i];
       }
-      if (it < 2) {
-        if (k < 8) return null;
-        const a = absr.subarray(0, k).sort();
-        sigma = Math.max(opt.minSigma, 1.4826 * a[k >> 1]);
-        if (opt.stable && opt.sigSmooth && sigPrev > 0 && it === 1) sigma = Math.max(opt.minSigma, 0.7 * sigPrev + 0.3 * sigma);
-      }
-      const cT = opt.tukey * sigma;
+    };
+    // масштаб невязок — один раз, от начального положения (MAD)
+    residAll(h, res);
+    let k = 0;
+    for (let i = 0; i < N; i++) if (ok[i]) absr[k++] = Math.abs(res[i]);
+    if (k < 8) return null;
+    const a0 = absr.subarray(0, k).sort();
+    let sigma = Math.max(opt.minSigma, 1.4826 * a0[k >> 1]);
+    if (opt.stable && opt.sigSmooth && sigPrev > 0) sigma = Math.max(opt.minSigma, 0.7 * sigPrev + 0.3 * sigma);
+    const cT = opt.tukey * sigma, c2 = cT * cT / 6;
+    const cost = (r) => { let s = 0; for (let i = 0; i < N; i++) { if (!ok[i]) continue; const q = r[i] / cT; s += Math.abs(q) < 1 ? c2 * (1 - (1 - q * q) ** 3) : c2; } return s; };
+    let E0 = cost(res), lam = 1e-3;
+    const A = new Float64Array(64), b = new Float64Array(8), j = new Float64Array(8), M = new Float64Array(64), bb = new Float64Array(8);
+    const h2 = new Array(9);
+    for (let it = 0; it < iters; it++) {
       A.fill(0); b.fill(0);
       let used = 0;
       for (let i = 0; i < N; i++) {
@@ -194,31 +202,43 @@ export function createTracker(o = {}) {
         const wt = (1 - q * q) ** 2 * (opt.stable ? gwt[i] : 1); used++;
         const e = E[i], x = e.bx, y = e.by, w = h[6] * x + h[7] * y + 1;
         const u = (h[0] * x + h[1] * y + h[2]) / w, v = (h[3] * x + h[4] * y + h[5]) / w;
-        const a = S * nu[i] / w, c = S * nv[i] / w;
-        j[0] = a * x; j[1] = a * y; j[2] = a; j[3] = c * x; j[4] = c * y; j[5] = c; j[6] = -(a * u + c * v) * x; j[7] = -(a * u + c * v) * y;
+        const aa = S * nu[i] / w, cc = S * nv[i] / w;
+        j[0] = aa * x; j[1] = aa * y; j[2] = aa; j[3] = cc * x; j[4] = cc * y; j[5] = cc; j[6] = -(aa * u + cc * v) * x; j[7] = -(aa * u + cc * v) * y;
         const ri = res[i];
         for (let p = 0; p < 8; p++) { const jp = j[p] * wt; b[p] -= jp * ri; for (let qq = 0; qq <= p; qq++) A[p * 8 + qq] += jp * j[qq]; }
       }
       if (used < 8) return null;
-      for (let p = 0; p < 8; p++) { A[p * 8 + p] *= 1 + 1e-6; A[p * 8 + p] += 1e-9; for (let qq = p + 1; qq < 8; qq++) A[p * 8 + qq] = A[qq * 8 + p]; }
-      const d = solveSPD(A, b, 8);
-      if (!d) return null;
-      for (let p = 0; p < 8; p++) h[p] += d[p];
-      // сдвиг углов листа (px) — для остановки
-      let mx = 0;
-      for (const [x, y] of SHEET) {
-        const w0 = (h[6] - d[6]) * x + (h[7] - d[7]) * y + 1, w1 = h[6] * x + h[7] * y + 1;
-        const du = (h[0] * x + h[1] * y + h[2]) / w1 - ((h[0] - d[0]) * x + (h[1] - d[1]) * y + h[2] - d[2]) / w0;
-        const dv = (h[3] * x + h[4] * y + h[5]) / w1 - ((h[3] - d[3]) * x + (h[4] - d[4]) * y + h[5] - d[5]) / w0;
-        mx = Math.max(mx, S * Math.hypot(du, dv));
+      for (let p = 0; p < 8; p++) for (let qq = p + 1; qq < 8; qq++) A[p * 8 + qq] = A[qq * 8 + p];
+      let accepted = false, mx = 0;
+      for (let tries = 0; tries < 6 && !accepted; tries++) {
+        M.set(A); bb.set(b);
+        for (let p = 0; p < 8; p++) M[p * 8 + p] = A[p * 8 + p] * (1 + lam) + 1e-9;
+        const d = solveSPD(M, bb, 8);
+        if (!d) { lam *= 10; continue; }
+        for (let p = 0; p < 8; p++) h2[p] = h[p] + d[p];
+        h2[8] = 1;
+        residAll(h2, r1);
+        const E1 = cost(r1);
+        if (E1 <= E0) {
+          accepted = true;
+          // сдвиг углов листа (px) — для остановки
+          for (const [x, y] of SHEET) {
+            const w0 = h[6] * x + h[7] * y + 1, w1 = h2[6] * x + h2[7] * y + 1;
+            const du = (h2[0] * x + h2[1] * y + h2[2]) / w1 - (h[0] * x + h[1] * y + h[2]) / w0;
+            const dv = (h2[3] * x + h2[4] * y + h2[5]) / w1 - (h[3] * x + h[4] * y + h[5]) / w0;
+            mx = Math.max(mx, S * Math.hypot(du, dv));
+          }
+          for (let p = 0; p < 9; p++) h[p] = h2[p];
+          for (let i = 0; i < N; i++) if (ok[i]) res[i] = r1[i];
+          E0 = E1; lam = Math.max(1e-6, lam * 0.3);
+        } else lam *= 10;
       }
-      if (mx < 0.02) break;
+      if (!accepted || mx < 0.02) break;
     }
     if (opt.stable) sigPrev = sigma;
     const H = toPx(h);
     resid(H, res);
     let used = 0, s2 = 0;
-    const cT = opt.tukey * sigma;
     for (let i = 0; i < N; i++) if (ok[i] && Math.abs(res[i]) < cT) { used++; s2 += res[i] * res[i]; }
     return { H, used, rms: Math.sqrt(s2 / Math.max(1, used)), sigma };
   }
@@ -264,21 +284,39 @@ export function createTracker(o = {}) {
     st.cellPx = cellPx;
     if (!(cellPx > 1.5)) { st.why = 'мелко'; return null; }
     let H = H0, fr = null;
-    // 1) только наружные края меток, шире
-    const R1 = Math.max(3, Math.min(R0, 1.6 * cellPx + 1)) | 0;
-    let cnt = search(H, R1, false); st.passes++;
-    if (cnt < 12) { st.why = 'краёв ' + cnt; return null; }
-    fr = fit(H, 6); if (!fr) { st.why = 'не сошлось'; return null; }
-    H = fr.H;
-    // 2) все края, узко; 3) ещё раз, если сдвинулось
-    for (let pass = 0; pass < 2; pass++) {
-      cnt = search(H, Math.max(2, Math.round(0.45 * cellPx)), true); st.passes++;
-      if (cnt < 12) break;
-      const f2 = fit(H, 5); if (!f2) break;
-      const a = cornersOf(H), b = cornersOf(f2.H); let mv = 0; for (let k = 0; k < 8; k++) mv = Math.max(mv, Math.abs(a[k] - b[k]));
-      fr = f2; H = f2.H;
-      if (mv < 0.15) break;
+    st.trace = [];
+    // 1) только наружные края меток, шире — когда лист мог сильно сдвинуться (R0 большой).
+    //    Если ждём его почти там же, сразу все края: по одним наружным наклон дальнего края определяется слабо,
+    //    и под наклоном этот проход уводил верное начало на несколько пикселей.
+    let cnt = 0;
+    if (R0 > opt.outerFirst) {
+      const R1 = Math.max(3, Math.min(R0, 1.6 * cellPx + 1)) | 0;
+      cnt = search(H, R1, false); st.passes++;
+      if (cnt < 12) { st.why = 'краёв ' + cnt; return null; }
+      fr = fit(H, 6); if (!fr) { st.why = 'не сошлось'; return null; }
+      H = fr.H; st.trace.push({ pass: 'наружн', found: cnt, used: fr.used, c: cornersOf(H) });
     }
+    // 2) все края; повторять, пока сходится заметно больше краёв или углы ещё двигаются
+    //    (под наклоном первое решение бывает неверным на дальнем краю листа и само выходит к верному за 2–3 повтора)
+    let prevUsed = 0, prevDlt = null;
+    for (let pass = 0; pass < opt.maxPasses; pass++) {
+      cnt = search(H, Math.max(3, Math.round(cellPx)), true); st.passes++;
+      if (cnt < 12) break;
+      const f2 = fit(H, opt.fitIters); if (!f2) break;
+      const a = cornersOf(H), b = cornersOf(f2.H); let mv = 0; for (let k = 0; k < 8; k++) mv = Math.max(mv, Math.abs(a[k] - b[k]));
+      fr = f2;
+      // полушаг между проходами: под наклоном проходы качались туда-обратно вокруг верного решения
+      // (края тонких клеток цепляются за соседние такие же), а среднее двух соседних проходов — почти верное
+      // (полушаг — только если сдвиг сменил направление на обратное, то есть проходы действительно качаются)
+      const dlt = b.map((v, k) => v - a[k]);
+      let dot = 0; if (prevDlt) for (let k = 0; k < 8; k++) dot += dlt[k] * prevDlt[k];
+      if (opt.relax < 1 && prevDlt && dot < 0 && mv > 0.15) { const c = a.map((v, k) => v + dlt[k] * opt.relax); H = hFrom4(c) || f2.H; prevDlt = dlt.map((v) => v * opt.relax); }
+      else { H = f2.H; prevDlt = dlt; }
+      st.trace.push({ pass: 'все', found: cnt, used: f2.used, c: cornersOf(H) });
+      if (mv < opt.stopMove && f2.used <= prevUsed * 1.02) break;
+      prevUsed = f2.used;
+    }
+    if (!fr) { st.why = 'краёв ' + cnt; return null; }
     const vr = verify(H);
     Object.assign(st, { n: cnt, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, tagsVis: vr.vis, contrast: vr.contrast, rej: Array.from(rej) });
     if (vr.tagsOk < 2) { st.why = `коды ${vr.tagsOk}/${vr.vis}`; return null; }
@@ -317,5 +355,5 @@ export function createTracker(o = {}) {
     return { H, used: fr.used, rms: fr.rms, tagsOk: sup, okTags, tagsVis: nv, cellPx, contrast: 0, blur: true };
   }
 
-  return { refine, refineBlur, st, nEdges: N };
+  return { refine, refineBlur, st, opt, nEdges: N, debug: { E, why, str, mu, mv, nu, nv, ok } };
 }
