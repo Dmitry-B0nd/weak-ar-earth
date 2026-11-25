@@ -45,7 +45,7 @@ async function frameGray(frame, r) {
 self.onmessage = async (ev) => {
   const m = ev.data;
   const mod = await ready;
-  if (m.type === 'cfg') { vision = mod.createVision(); vision.setCamera(m.W, m.H, m.f); return; }
+  if (m.type === 'cfg') { vision = mod.createVision(m.opt || {}); vision.setCamera(m.W, m.H, m.f); return; }
   if (m.type !== 'frame' || !vision) { if (m.bmp) m.bmp.close(); if (m.frame) m.frame.close(); return; }
   const t0 = performance.now();
   let g, r = m.roi;
@@ -63,7 +63,7 @@ self.onmessage = async (ev) => {
   // участок для следующего кадра
   res.roiNext = vision.roiFor(m.tf + (m.dt || 50));
   res.type = 'res'; res.id = m.id; res.grabMs = t1 - t0; res.visMs = t2 - t1; res.fmt = fmt; res.roi = r;
-  res.tr = { why: res.why, used: res.used, edges: vision.tracker.st.n, rms: vision.tracker.st.rms, vis: vision.tracker.st.tagsVis };
+  res.tr = { why: res.why, used: res.used, edges: vision.tracker.st.n, rms: vision.tracker.st.rms, vis: vision.tracker.st.tagsVis, rej: vision.tracker.st.rej };
   if (res.pts) res.pts = Array.from(res.pts);
   self.postMessage(res);
 };

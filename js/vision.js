@@ -2,18 +2,18 @@
 //   слежение — края меток около предсказанного положения листа, полное разрешение;
 //   поиск (только когда лист потерян) — js-aruco2 на уменьшенной вдвое картинке, затем то же уточнение краями.
 // На выходе — гомография «лист → пиксели кадра», углы подтверждённых меток и поза листа.
-import { AR, CV } from '../vendor/aruco.mjs?v=0.2';
-import { createTracker, hFrom4, cornersOf } from './track.js?v=0.2';
-import { createPoseEstimator } from './pose.js?v=0.2';
-import { createCoarse } from './coarse.js?v=0.2';
-import { tagCorners } from './board.js?v=0.2';
-import { applyH, fitH } from './geom.js?v=0.2';
+import { AR, CV } from '../vendor/aruco.mjs?v=0.3';
+import { createTracker, hFrom4, cornersOf } from './track.js?v=0.3';
+import { createPoseEstimator } from './pose.js?v=0.3';
+import { createCoarse } from './coarse.js?v=0.3';
+import { tagCorners } from './board.js?v=0.3';
+import { applyH, fitH } from './geom.js?v=0.3';
 
 const now = () => performance.now();
 
 export function createVision(o = {}) {
   const opt = { predict: 0.8, acqScale: 2, blurMax: 8, minScore: 0.5, ...o };
-  const T = createTracker();
+  const T = createTracker({ stable: !!o.stableEdges });
   const C = createCoarse();
   const P = createPoseEstimator();
   const det = new AR.Detector({ dictionaryName: 'APRILTAG_16h5', maxHammingDistance: 1 });

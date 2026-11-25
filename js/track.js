@@ -1,8 +1,8 @@
 // Слежение за листом по известному рисунку: края клеток всех меток ищутся в полном разрешении вдоль нормали
 // около предсказанного положения, по ним уточняется гомография «лист → пиксели» (8 чисел, через 4 угла листа).
 // Проверка: по найденной гомографии читаются клетки меток; лист принят, если коды совпали.
-import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.2';
-import { applyH, solveSPD } from './geom.js?v=0.2';
+import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.3';
+import { applyH, solveSPD } from './geom.js?v=0.3';
 
 const SHEET = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
@@ -23,12 +23,15 @@ export function hFrom4(c) {
 export const cornersOf = (H) => { const o = []; for (const [x, y] of SHEET) o.push(...applyH(H, x, y)); return o; };
 
 export function createTracker(o = {}) {
-  const opt = { tukey: 4.685, minSigma: 0.35, ...o };
+  // stable — опыт 0.3 (?edge=stable): вес края плавно зависит от размера клетки вдоль нормали (вместо жёсткого
+  // порога), масштаб невязок сглаживается между кадрами. Цель — чтобы набор краёв не скакал от кадра к кадру.
+  const opt = { tukey: 4.685, minSigma: 0.35, stable: false, ...o };
+  let sigPrev = 0;
   const E = buildEdges();
   const N = E.length;
   // рабочие массивы
   const mu = new Float64Array(N), mv = new Float64Array(N), nu = new Float64Array(N), nv = new Float64Array(N);
-  const ok = new Uint8Array(N), str = new Float64Array(N), res = new Float64Array(N), wt = new Float64Array(N);
+  const ok = new Uint8Array(N), str = new Float64Array(N), res = new Float64Array(N), wt = new Float64Array(N), gwt = new Float64Array(N).fill(1);
   const st = { n: 0, used: 0, rms: 0, tagsOk: 0, tagsVis: 0, cellPx: 0, contrast: 0, passes: 0, why: '' };
 
   let G = null, GW = 0, GH = 0, OX = 0, OY = 0;   // серый участок кадра и его место в кадре
@@ -41,9 +44,11 @@ export function createTracker(o = {}) {
 
   // поиск края для всех точек; R — полуширина поиска (px), inner — и внутренние края клеток
   const prof = new Float64Array(64);
+  const rej = new Int32Array(6);       // почему край не взят: мелко, вне кадра, слабый, на краю окна, два края, слабее других
   function search(H, R, inner) {
     let cnt = 0;
     const strs = [];
+    rej.fill(0);
     for (let i = 0; i < N; i++) {
       ok[i] = 0;
       const e = E[i];
@@ -51,7 +56,11 @@ export function createTracker(o = {}) {
       const p = applyH(H, e.bx, e.by), q = applyH(H, e.bx + e.nx * CELL, e.by + e.ny * CELL);
       let dx = q[0] - p[0], dy = q[1] - p[1];
       const cell = Math.hypot(dx, dy);                 // клетка в пикселях вдоль нормали
-      if (!(cell > (e.outer ? 1.6 : 2.6))) continue;  // слишком мелко
+      if (opt.stable) {
+        // вес по размеру клетки: наружные края — от 2 до 3,5 px, внутренние — от 3,5 до 5,5 px
+        gwt[i] = e.outer ? Math.min(1, Math.max(0, (cell - 2) / 1.5)) : Math.min(1, Math.max(0, (cell - 3.5) / 2));
+        if (!(gwt[i] > 0)) { rej[0]++; continue; }
+      } else if (!(cell > (e.outer ? 1.6 : 2.6))) { rej[0]++; continue; }  // слишком мелко
       dx /= cell; dy /= cell;
       // окно: для наружных краёв — R; для внутренних — около половины клетки, но не меньше ±2 px
       // (одноимённый соседний край не ближе двух клеток, а при ±1 px край на границе окна терял долю пикселя)
@@ -59,16 +68,16 @@ export function createTracker(o = {}) {
       // профиль яркости вдоль нормали: от −r−1 до r+1
       let bad = false;
       for (let s = -r - 1, k = 0; s <= r + 1; s++, k++) { const v = pix(p[0] + s * dx, p[1] + s * dy); if (v < 0) { bad = true; break; } prof[k] = v; }
-      if (bad) continue;
+      if (bad) { rej[1]++; continue; }
       // производная (от тёмного к светлому — положительная), максимум
       let best = -1e9, bs = 0, second = -1e9;
       for (let s = -r, k = 1; s <= r; s++, k++) {
         const d = (prof[k + 1] - prof[k - 1]) * 0.5;
         if (d > best) { if (Math.abs(s - bs) > 2) second = Math.max(second, best); best = d; bs = s; } else if (Math.abs(s - bs) > 2 && d > second) second = d;
       }
-      if (!(best > 3)) continue;
-      if (bs === -r || bs === r) continue;             // максимум на краю окна — настоящий край может быть дальше
-      if (second > 0.75 * best) continue;             // два похожих края — не знаем, какой наш
+      if (!(best > 3)) { rej[2]++; continue; }
+      if (bs === -r || bs === r) { rej[3]++; continue; }   // максимум на краю окна — настоящий край может быть дальше
+      if (second > 0.75 * best) { rej[4]++; continue; }   // два похожих края — не знаем, какой наш
       // доля пикселя: парабола по соседям
       const k = bs + r + 1;
       let off = 0;
@@ -85,7 +94,7 @@ export function createTracker(o = {}) {
     if (cnt > 8) {
       strs.sort((a, b) => a - b);
       const thr = strs[strs.length >> 1] * 0.33;
-      for (let i = 0; i < N; i++) if (ok[i] && str[i] < thr) { ok[i] = 0; cnt--; }
+      for (let i = 0; i < N; i++) if (ok[i] && str[i] < thr) { ok[i] = 0; cnt--; rej[5]++; }
     }
     return cnt;
   }
@@ -174,6 +183,7 @@ export function createTracker(o = {}) {
         if (k < 8) return null;
         const a = absr.subarray(0, k).sort();
         sigma = Math.max(opt.minSigma, 1.4826 * a[k >> 1]);
+        if (opt.stable && opt.sigSmooth && sigPrev > 0 && it === 1) sigma = Math.max(opt.minSigma, 0.7 * sigPrev + 0.3 * sigma);
       }
       const cT = opt.tukey * sigma;
       A.fill(0); b.fill(0);
@@ -181,7 +191,7 @@ export function createTracker(o = {}) {
       for (let i = 0; i < N; i++) {
         if (!ok[i]) continue;
         const q = res[i] / cT; if (Math.abs(q) >= 1) continue;
-        const wt = (1 - q * q) ** 2; used++;
+        const wt = (1 - q * q) ** 2 * (opt.stable ? gwt[i] : 1); used++;
         const e = E[i], x = e.bx, y = e.by, w = h[6] * x + h[7] * y + 1;
         const u = (h[0] * x + h[1] * y + h[2]) / w, v = (h[3] * x + h[4] * y + h[5]) / w;
         const a = S * nu[i] / w, c = S * nv[i] / w;
@@ -204,6 +214,7 @@ export function createTracker(o = {}) {
       }
       if (mx < 0.02) break;
     }
+    if (opt.stable) sigPrev = sigma;
     const H = toPx(h);
     resid(H, res);
     let used = 0, s2 = 0;
@@ -269,7 +280,7 @@ export function createTracker(o = {}) {
       if (mv < 0.15) break;
     }
     const vr = verify(H);
-    Object.assign(st, { n: cnt, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, tagsVis: vr.vis, contrast: vr.contrast });
+    Object.assign(st, { n: cnt, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, tagsVis: vr.vis, contrast: vr.contrast, rej: Array.from(rej) });
     if (vr.tagsOk < 2) { st.why = `коды ${vr.tagsOk}/${vr.vis}`; return null; }
     return { H, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, okTags: vr.okTags, tagsVis: vr.vis, cellPx, contrast: vr.contrast };
   }

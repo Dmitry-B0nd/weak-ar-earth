@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.2';
-import { createRenderer } from './render.js?v=0.2';
-import { createPoseTrack } from './pose.js?v=0.2';
+import { BUILD } from './build.js?v=0.3';
+import { createRenderer } from './render.js?v=0.3';
+import { createPoseTrack } from './pose.js?v=0.3';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -10,7 +10,11 @@ const Q = new URLSearchParams(location.search);
 let CAP = Q.get('cap') || ('MediaStreamTrackProcessor' in window ? 'vf' : 'bitmap');
 const CAMW = +Q.get('w') || 640, CAMH = +Q.get('h') || 480, CAMFPS = +Q.get('fps') || 30;
 const FOV = +Q.get('fov') || 66;                          // угол обзора по длинной стороне (не измерен — принят)
-const MAXDELAY = 160;                                     // мс: дольше кадр не ждёт своей позы
+const MAXDELAY = 160;
+// Опыты (выбираются один раз адресом): ?edge=stable — устойчивый набор краёв; ?exp=N — короткая выдержка, N в единицах
+// 100 мкс (как в стандарте; 80 = 8 мс), если камера это умеет.
+const VOPT = { stableEdges: Q.get('edge') === 'stable' };
+const EXP = +Q.get('exp') || 0;                                     // мс: дольше кадр не ждёт своей позы
 
 const $ = (id) => document.getElementById(id);
 const panel = $('panel'), canvas = $('gl'), video = $('video');
@@ -37,12 +41,27 @@ async function openCamera() {
   const t0 = performance.now();
   while (!video.videoWidth && performance.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 30));
   setSize(video.videoWidth, video.videoHeight);
+  // что умеет камера (выдержка, фокус, частота) — в журнал записи
+  try {
+    const c = track.getCapabilities ? track.getCapabilities() : {};
+    const pick = (k) => (c[k] === undefined ? '' : `${k} ${JSON.stringify(c[k])}`);
+    CAPS = c;
+    log('камера умеет:', ['exposureMode', 'exposureTime', 'exposureCompensation', 'iso', 'focusMode', 'frameRate', 'torch'].map(pick).filter(Boolean).join('; ') || 'ничего не сообщает');
+  } catch (e) { log('getCapabilities:', e.message); }
+  if (EXP) {
+    try {
+      await track.applyConstraints({ advanced: [{ exposureMode: 'manual', exposureTime: EXP }] });
+      const st = track.getSettings();
+      log('выдержка: просили', EXP, '→ стоит', st.exposureMode, st.exposureTime, 'iso', st.iso);
+    } catch (e) { log('выдержку задать не вышло:', e.message); }
+  }
 }
+let CAPS = null;
 function setSize(w, h) {
   if (!w || !h || (w === vw && h === vh)) return;
   vw = w; vh = h; f0 = (Math.max(w, h) / 2) / Math.tan(FOV * Math.PI / 360);
   T.reset(); roiNext = null;
-  worker.postMessage({ type: 'cfg', W: w, H: h, f: f0 });
+  worker.postMessage({ type: 'cfg', W: w, H: h, f: f0, opt: VOPT });
   log('кадр', w + '×' + h, 'фокус', f0.toFixed(0), 'px');
 }
 
@@ -127,7 +146,7 @@ function onResult(m) {
     tf: +m.tf.toFixed(1), t: Math.round(now), n: m.n, tags: m.tags, err: +(m.err || 0).toFixed(3), mode: m.mode,
     H: m.H ? m.H.map((v) => +v.toPrecision(7)) : null, pts: m.pts ? m.pts.map((v) => +v.toFixed(2)) : null,
     ms: { grab: +m.grabMs.toFixed(1), vis: +m.visMs.toFixed(1), acq: +m.ms.acq.toFixed(1), coarse: +(m.ms.coarse || 0).toFixed(1), q: s ? +(now - s.t0).toFixed(1) : 0 },
-    roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, why: m.why || undefined,
+    roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, found: m.tr && m.tr.edges, rej: m.tr && m.tr.rej, why: m.why || undefined,
   });
   if (m.R) T.add(m.tf, m.R, m.t);
 }
@@ -179,7 +198,7 @@ function panelTick() {
   const L = T.last, dist = L ? Math.hypot(...L.t) : 0;
   const set = track && track.getSettings ? track.getSettings() : {};
   panel.textContent =
-    `сборка ${BUILD} · захват ${CAP === 'vf' ? 'кадр камеры' : 'картинка'} (${S.fmt || '…'})\n` +
+    `сборка ${BUILD} · захват ${CAP === 'vf' ? 'кадр камеры' : 'картинка'} (${S.fmt || '…'})${VOPT.stableEdges ? ' · края: устойч.' : ''}${EXP ? ' · выдержка ' + ((track && track.getSettings && track.getSettings().exposureTime) ?? 'не задана') : ''}\n` +
     `камера ${vw}×${vh}, заказ ${CAMFPS} к/с (${set.frameRate ? set.frameRate.toFixed(0) : '?'}), факт ${(d('frames') / dt).toFixed(1)} к/с, интервал ${med.toFixed(0)} мс\n` +
     `зрение ${(d('res') / dt).toFixed(1)}/с: след ${d('track')} смаз ${d('blur')} поиск ${d('acq')} нет ${d('none')} · участок ${S.roi}\n` +
     `  поток ${(d('visMs') / res).toFixed(1)} мс (захват ${(d('grabMs') / res).toFixed(1)}, грубо ${(d('coarseMs') / res).toFixed(1)}, поиск ${(d('acqMs') / res).toFixed(1)}, поза ${(d('poseMs') / res).toFixed(1)}), главный ${(d('mainGrab') / Math.max(1, d('sent'))).toFixed(1)} мс\n` +
@@ -192,7 +211,7 @@ function panelTick() {
 // ---------- запись ----------
 function recordJSON() {
   const set = track && track.getSettings ? track.getSettings() : {};
-  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, ua: navigator.userAgent, at: new Date().toISOString(),
+  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, exp: EXP }, caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
     raw: { frames: REC.frames, det: REC.det, o: [], m: [] } });
