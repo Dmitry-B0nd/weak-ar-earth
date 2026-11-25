@@ -1,8 +1,8 @@
 // Слежение за листом по известному рисунку: края клеток всех меток ищутся в полном разрешении вдоль нормали
 // около предсказанного положения, по ним уточняется гомография «лист → пиксели» (8 чисел, через 4 угла листа).
 // Проверка: по найденной гомографии читаются клетки меток; лист принят, если коды совпали.
-import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.5';
-import { applyH, solveSPD } from './geom.js?v=0.5';
+import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.6';
+import { applyH, solveSPD } from './geom.js?v=0.6';
 
 const SHEET = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
@@ -319,7 +319,9 @@ export function createTracker(o = {}) {
     if (!fr) { st.why = 'краёв ' + cnt; return null; }
     const vr = verify(H);
     Object.assign(st, { n: cnt, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, tagsVis: vr.vis, contrast: vr.contrast, rej: Array.from(rej) });
-    if (vr.tagsOk < 2) { st.why = `коды ${vr.tagsOk}/${vr.vis}`; return null; }
+    // меньше половины видимых целиком меток подтвердилось — скорее неверное решение (сдвиг на клетку, перекос),
+    // чем правда: на записи 0.5 такие кадры (2–3 из 9 меток, половина краёв) давали скачок наклона на 6–9°
+    if (vr.tagsOk < 2 || vr.tagsOk * 2 < vr.vis) { st.why = `коды ${vr.tagsOk}/${vr.vis}`; return null; }
     return { H, used: fr.used, rms: fr.rms, tagsOk: vr.tagsOk, okTags: vr.okTags, tagsVis: vr.vis, cellPx, contrast: vr.contrast };
   }
   // Слежение при смазе: только наружные края меток, окно шире, коды не проверяются (их не прочесть).

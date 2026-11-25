@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.5';
-import { createRenderer } from './render.js?v=0.5';
-import { createPoseTrack } from './pose.js?v=0.5';
+import { BUILD } from './build.js?v=0.6';
+import { createRenderer } from './render.js?v=0.6';
+import { createPoseTrack } from './pose.js?v=0.6';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -160,7 +160,7 @@ function onResult(m) {
     tf: +m.tf.toFixed(1), t: Math.round(now), n: m.n, tags: m.tags, err: +(m.err || 0).toFixed(3), mode: m.mode,
     H: m.H ? m.H.map((v) => +v.toPrecision(7)) : null, pts: m.pts ? m.pts.map((v) => +v.toFixed(2)) : null,
     ms: { grab: +m.grabMs.toFixed(1), vis: +m.visMs.toFixed(1), acq: +m.ms.acq.toFixed(1), coarse: +(m.ms.coarse || 0).toFixed(1), q: s ? +(now - s.t0).toFixed(1) : 0 },
-    roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, found: m.tr && m.tr.edges, rej: m.tr && m.tr.rej, why: m.why || undefined,
+    roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, found: m.tr && m.tr.edges, vis: m.tr && m.tr.vis, rej: m.tr && m.tr.rej, why: m.why || undefined,
   });
   if (m.R) T.add(m.tf, m.R, m.t);
 }
