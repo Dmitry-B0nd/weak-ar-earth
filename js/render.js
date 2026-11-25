@@ -23,6 +23,40 @@ void main(){
   gl_FragColor = vec4(c * l, col.a);
 }`;
 
+// Земля с текстурами: день (Blue Marble), ночные огни, облака и маска воды (упакованы в одну текстуру), солнце,
+// блик на воде, атмосфера по краю. Координаты вершины — единичная сфера Земли (z — к северу), uv — карта.
+const VS_E = `attribute vec3 p; attribute vec2 uv; uniform mat4 P; uniform mat4 MV; varying vec2 vuv; varying vec3 vn; varying vec3 vp;
+void main(){ vuv = uv; vec4 q = MV * vec4(p, 1.0); vp = q.xyz; vn = mat3(MV) * p; gl_Position = P * q; }`;
+const FS_E = `precision mediump float;
+varying vec2 vuv; varying vec3 vn; varying vec3 vp;
+uniform sampler2D tDay; uniform sampler2D tMix; uniform vec3 sun; uniform float cloudU;
+void main(){
+  vec3 n = normalize(vn), v = normalize(-vp);
+  float ndl = dot(n, sun);
+  float dayF = smoothstep(-0.12, 0.22, ndl);
+  vec3 day = texture2D(tDay, vuv).rgb;
+  vec4 mx = texture2D(tMix, vuv);
+  float cl = texture2D(tMix, vec2(vuv.x + cloudU, vuv.y)).g;
+  float dif = max(ndl, 0.0);
+  vec3 col = day * (0.06 + 1.05 * dif);
+  vec3 h = normalize(sun + v);
+  col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
+  col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
+  col += vec3(1.0, 0.78, 0.45) * mx.r * (1.0 - dayF) * (1.0 - cl * 0.8) * 1.1;
+  float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+  col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+// ореол атмосферы: сфера чуть больше Земли, видны её задние грани, свечение тает к внешнему краю
+const FS_H = `precision mediump float;
+varying vec2 vuv; varying vec3 vn; varying vec3 vp; uniform vec3 sun; uniform float edge;
+void main(){
+  vec3 n = normalize(vn), v = normalize(-vp);
+  float k = smoothstep(0.0, edge, -dot(n, v));
+  float lit = 0.25 + 0.75 * smoothstep(-0.4, 0.6, dot(-n, sun));
+  gl_FragColor = vec4(vec3(0.30, 0.55, 1.0) * k * k * 0.55 * lit, 1.0);
+}`;
+
 function prog(gl, vs, fs) {
   const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
   const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
@@ -42,6 +76,19 @@ function sphere(r, cz, nLat = 18, nLon = 28) {
   for (let i = 0; i < nLat; i++) for (let j = 0; j < nLon; j++) { const a = i * (nLon + 1) + j, b = a + nLon + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
   return { pos, nor, idx };
 }
+// единичная сфера Земли с координатами карты: z — к северу; u — долгота от −180°, v — от северного полюса
+function earthSphere(nLat = 32, nLon = 64) {
+  const pos = [], uv = [], idx = [];
+  for (let i = 0; i <= nLat; i++) {
+    const lat = Math.PI / 2 - Math.PI * i / nLat;
+    for (let j = 0; j <= nLon; j++) {
+      const lon = -Math.PI + 2 * Math.PI * j / nLon;
+      pos.push(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)); uv.push(j / nLon, i / nLat);
+    }
+  }
+  for (let i = 0; i < nLat; i++) for (let j = 0; j < nLon; j++) { const a = i * (nLon + 1) + j, b = a + nLon + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  return { pos, uv, idx };
+}
 // рамка по краю листа (толщина w, в плоскости листа, чуть над ним) и стойка от центра листа к Земле
 function frameMesh(w) {
   const pos = [], nor = [], idx = [];
@@ -58,7 +105,11 @@ function frameMesh(w) {
   return { pos, nor, idx };
 }
 
+const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
+const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
+
 export function createRenderer(canvas, o = {}) {
+  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, ...o };   // солнце — в осях листа
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false, depth: true, powerPreference: 'low-power', preserveDrawingBuffer: false, desynchronized: false });
   if (!gl) throw new Error('WebGL недоступен');
   const pBg = prog(gl, VS_BG, FS_BG), pM = prog(gl, VS_M, FS_M);
@@ -71,6 +122,35 @@ export function createRenderer(canvas, o = {}) {
     return b;
   };
   const earth = mesh(sphere(0.45, -0.55)), frame = mesh(frameMesh(0.02));
+  // Земля с текстурами
+  const pE = prog(gl, VS_E, FS_E), pH = prog(gl, VS_E, FS_H);
+  const es = earthSphere();
+  const eb = { p: gl.createBuffer(), uv: gl.createBuffer(), i: gl.createBuffer(), count: es.idx.length };
+  gl.bindBuffer(gl.ARRAY_BUFFER, eb.p); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(es.pos), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, eb.uv); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(es.uv), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb.i); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(es.idx), gl.STATIC_DRAW);
+  const aniso = gl.getExtension('EXT_texture_filter_anisotropic') || gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
+  const tex = { day: null, mix: null, info: '', ms: 0 };
+  async function loadTex(url) {
+    const t0 = performance.now();
+    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = url;
+    await img.decode();
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(4, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+    tex.ms += performance.now() - t0;
+    return { t, w: img.width, h: img.height };
+  }
+  // загрузить текстуры Земли (размер дневной — 2048 или 1024)
+  async function loadEarth(base, size) {
+    const mixSize = size >= 2048 ? 1024 : 512;
+    const [d, m] = await Promise.all([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
+    tex.day = d.t; tex.mix = m.t; tex.info = `${d.w}×${d.h} + ${m.w}×${m.h}`;
+  }
   // кольцо текстур с кадрами камеры
   const ring = [];
   for (let i = 0; i < (o.ring || 6); i++) {
@@ -130,9 +210,55 @@ export function createRenderer(canvas, o = {}) {
       gl.bindBuffer(gl.ARRAY_BUFFER, m.n); gl.enableVertexAttribArray(ln); gl.vertexAttribPointer(ln, 3, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.i); gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
     };
-    drawMesh(frame, [1.0, 0.8, 0.1, 1], 0);
-    drawMesh(earth, [0.15, 0.4, 0.8, 1], 1);
+    if (opt.frame) drawMesh(frame, [1.0, 0.8, 0.1, 1], 0);
     gl.disableVertexAttribArray(lp); gl.disableVertexAttribArray(ln);
+    if (!tex.day) {
+      gl.useProgram(pM); gl.enableVertexAttribArray(lp); gl.enableVertexAttribArray(ln);
+      drawMesh(earth, [0.15, 0.4, 0.8, 1], 1);
+      gl.disableVertexAttribArray(lp); gl.disableVertexAttribArray(ln);
+      return;
+    }
+    // модель Земли: центр на 0,55 над листом, радиус 0,45; ось наклонена на 23,4°, суточное вращение
+    const tsec = performance.now() / 1000, spin = tsec * 2 * Math.PI / opt.dayLen;
+    const E = earthModel(spin);
+    const MV = mul4(M, E), MVh = mul4(M, earthModel(spin, 1.06));
+    const sunB = norm3(opt.sun), sunC = [R[0] * sunB[0] + R[1] * sunB[1] + R[2] * sunB[2], R[3] * sunB[0] + R[4] * sunB[1] + R[5] * sunB[2], R[6] * sunB[0] + R[7] * sunB[1] + R[8] * sunB[2]];
+    const bindE = (pr) => {
+      gl.useProgram(pr);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pr, 'P'), false, P);
+      gl.uniform3f(gl.getUniformLocation(pr, 'sun'), ...sunC);
+      const ap = gl.getAttribLocation(pr, 'p'), au = gl.getAttribLocation(pr, 'uv');
+      gl.bindBuffer(gl.ARRAY_BUFFER, eb.p); gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 0, 0);
+      if (au >= 0) { gl.bindBuffer(gl.ARRAY_BUFFER, eb.uv); gl.enableVertexAttribArray(au); gl.vertexAttribPointer(au, 2, gl.FLOAT, false, 0, 0); }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb.i);
+      return () => { gl.disableVertexAttribArray(ap); if (au >= 0) gl.disableVertexAttribArray(au); };
+    };
+    let off = bindE(pE);
+    gl.uniformMatrix4fv(gl.getUniformLocation(pE, 'MV'), false, MV);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex.day); gl.uniform1i(gl.getUniformLocation(pE, 'tDay'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex.mix); gl.uniform1i(gl.getUniformLocation(pE, 'tMix'), 1);
+    gl.uniform1f(gl.getUniformLocation(pE, 'cloudU'), (tsec / opt.cloudLen) % 1);
+    gl.drawElements(gl.TRIANGLES, eb.count, gl.UNSIGNED_SHORT, 0);
+    off();
+    // ореол: задние грани сферы побольше, складывается со светом, глубину не пишет
+    if (opt.halo) {
+      off = bindE(pH);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pH, 'MV'), false, MVh);
+      gl.uniform1f(gl.getUniformLocation(pH, 'edge'), Math.sqrt(1 - 1 / (1.06 * 1.06)));
+      gl.enable(gl.CULL_FACE); gl.cullFace(gl.FRONT); gl.frontFace(gl.CCW);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.depthMask(false);
+      gl.drawElements(gl.TRIANGLES, eb.count, gl.UNSIGNED_SHORT, 0);
+      gl.disable(gl.BLEND); gl.depthMask(true); gl.disable(gl.CULL_FACE);
+      off();
+    }
   }
-  return { gl, upload, draw, ring, setDpr(d) { dpr = d; } };
+  // матрица Земли в осях листа (по столбцам): перенос к центру, наклон оси, вращение, масштаб (k — для ореола)
+  function earthModel(spin, k = 1) {
+    const r = 0.45 * k, c = Math.cos(spin), s = Math.sin(spin), tl = opt.tilt * Math.PI / 180, ct = Math.cos(tl), st = Math.sin(tl);
+    // местные оси Земли → оси листа: север (z) → «вверх» над листом (−z листа), наклонённый на tl к +x
+    const Z = [st, 0, -ct], X0 = [ct, 0, st], Y0 = [0, -1, 0];       // правая тройка: X0 × Y0 = Z
+    const X = X0.map((v, i) => v * c + Y0[i] * s), Y = Y0.map((v, i) => -X0[i] * s + v * c);
+    return [X[0] * r, X[1] * r, X[2] * r, 0, Y[0] * r, Y[1] * r, Y[2] * r, 0, Z[0] * r, Z[1] * r, Z[2] * r, 0, 0, 0, -0.55, 1];
+  }
+  return { gl, upload, draw, ring, setDpr(d) { dpr = d; }, loadEarth, tex, opt };
 }

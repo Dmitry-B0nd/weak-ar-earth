@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.6';
-import { createRenderer } from './render.js?v=0.6';
-import { createPoseTrack } from './pose.js?v=0.6';
+import { BUILD } from './build.js?v=0.8';
+import { createRenderer } from './render.js?v=0.8';
+import { createPoseTrack } from './pose.js?v=0.8';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -18,6 +18,8 @@ const VOPT = { stableEdges: Q.get('edge') === 'stable' };
 const EXPQ = Q.get('exp');
 let EXP = EXPQ === null ? 80 : +EXPQ || 0;
 let camReady = true;                                        // пока выдержка ставится — картинку не показываем
+// Земля с текстурами: ?tex=2048 (по умолчанию), ?tex=1024 (облегчённо), ?tex=0 — простая сфера без текстур
+const TEX = Q.get('tex') === null ? 2048 : +Q.get('tex') || 0;
 
 const $ = (id) => document.getElementById(id);
 const panel = $('panel'), canvas = $('gl'), video = $('video');
@@ -29,10 +31,11 @@ let vw = 0, vh = 0, f0 = 0;
 const T = createPoseTrack();
 const REC = { frames: [], det: [], show: [] }; const RECMAX = 40000;
 const S = {                                               // счётчики для панели
-  frames: 0, raf: 0, res: 0, track: 0, blur: 0, acq: 0, none: 0, coarseMs: 0, visMs: 0, grabMs: 0, acqMs: 0, poseMs: 0, mainGrab: 0, sent: 0,
+  frames: 0, raf: 0, drawMs: 0, res: 0, track: 0, blur: 0, acq: 0, none: 0, coarseMs: 0, visMs: 0, grabMs: 0, acqMs: 0, poseMs: 0, mainGrab: 0, sent: 0,
   shown: 0, hidden: 0, delay: 0, draws: 0, lastRes: null, fmt: '', roi: '', camDt: [], maxGap: 0, lastShowT: 0, errs: 0,
 };
 let busy = false, busySince = 0, frameId = 0, roiNext = null, lastTf = 0, camDtAvg = 50;
+let lastAnsTf = -1;                                       // самый поздний кадр, по которому зрение уже ответило (с листом или без)
 const sent = new Map();
 
 // ---------- камера ----------
@@ -71,6 +74,7 @@ async function setExposure(E) {
   } catch (e) { log('выдержку задать не вышло:', e.message); }
 }
 let CAPS = null;
+function gpuName() { try { const gl = R.gl, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); } catch (e) { return ''; } }
 function setSize(w, h) {
   if (!w || !h || (w === vw && h === vh)) return;
   vw = w; vh = h; f0 = (Math.max(w, h) / 2) / Math.tan(FOV * Math.PI / 360);
@@ -156,6 +160,7 @@ function onResult(m) {
   if (m.mode === 'след') S.track++; else if (m.mode === 'смаз') S.blur++; else if (m.mode === 'поиск') S.acq++; else S.none++;
   S.coarseMs += m.ms.coarse || 0;
   S.lastRes = m; roiNext = m.roiNext;
+  if (m.tf > lastAnsTf) lastAnsTf = m.tf;
   if (REC.det.length < RECMAX) REC.det.push({
     tf: +m.tf.toFixed(1), t: Math.round(now), n: m.n, tags: m.tags, err: +(m.err || 0).toFixed(3), mode: m.mode,
     H: m.H ? m.H.map((v) => +v.toPrecision(7)) : null, pts: m.pts ? m.pts.map((v) => +v.toFixed(2)) : null,
@@ -173,7 +178,9 @@ let shown = null, visible = false, D = 60;
 function loop(now) {
   requestAnimationFrame(loop);
   S.raf++;
-  for (const r of R.ring) if (r.n >= 0 && !r.cov && T.covered(r.tf)) {
+  // кадр готов к показу, когда для него есть поза или зрение уже ответило по более позднему кадру (тогда своей позы
+  // у него не будет: ждать её до MAXDELAY незачем — при потере листа это давало паузы показа до 134 мс)
+  for (const r of R.ring) if (r.n >= 0 && !r.cov && (T.covered(r.tf) || lastAnsTf > r.tf + 0.5)) {
     r.cov = now; const L = Math.min(MAXDELAY, now - r.ta + 6);
     D += (L - D) * (L > D ? 0.3 : 0.03);
   }
@@ -196,8 +203,10 @@ function loop(now) {
   visible = !!pose;
   if (pose) S.shown++; else S.hidden++;
   S.delay += now - pick.ta; S.draws++;
+  const td = performance.now();
   R.draw(pick, camReady ? pose : null, f0, !camReady);
-  if (REC.show.length < RECMAX) REC.show.push([Math.round(now), +pick.tf.toFixed(1), pose ? 1 : 0]);
+  S.drawMs += performance.now() - td;
+  if (REC.show.length < RECMAX) REC.show.push([Math.round(now), +pick.tf.toFixed(1), pose ? 1 : 0, +(performance.now() - td).toFixed(1)]);
 }
 
 // ---------- панель ----------
@@ -218,15 +227,15 @@ function panelTick() {
     `зрение ${(d('res') / dt).toFixed(1)}/с: след ${d('track')} смаз ${d('blur')} поиск ${d('acq')} нет ${d('none')} · участок ${S.roi}\n` +
     `  поток ${(d('visMs') / res).toFixed(1)} мс (захват ${(d('grabMs') / res).toFixed(1)}, грубо ${(d('coarseMs') / res).toFixed(1)}, поиск ${(d('acqMs') / res).toFixed(1)}, поза ${(d('poseMs') / res).toFixed(1)}), главный ${(d('mainGrab') / Math.max(1, d('sent'))).toFixed(1)} мс\n` +
     `метки ${m.tags || 0}/${tr.vis || 0} · лист ${sheetPx.toFixed(0)} px, клетка ${(m.cellPx || 0).toFixed(1)} px · края ${tr.used || 0}/${tr.edges || 0}, ошибка ${(m.err || 0).toFixed(2)} px\n` +
-    `показ ${(draws / dt).toFixed(1)} к/с (rAF ${(d('raf') / dt).toFixed(0)}), задержка ${(d('delay') / draws).toFixed(0)} мс, сцена ${(100 * d('shown') / draws).toFixed(0)}%, пауза max ${S.maxGap.toFixed(0)} мс\n` +
-    `расстояние ${dist.toFixed(1)} листа · запись ${REC.det.length} · ошибок ${S.errs}` + (m.why ? `\n${m.why}` : '');
+    `показ ${(draws / dt).toFixed(1)} к/с (rAF ${(d('raf') / dt).toFixed(0)}, рисование ${(d('drawMs') / draws).toFixed(1)} мс), задержка ${(d('delay') / draws).toFixed(0)} мс, сцена ${(100 * d('shown') / draws).toFixed(0)}%, пауза max ${S.maxGap.toFixed(0)} мс\n` +
+    `расстояние ${dist.toFixed(1)} листа · Земля ${TEX ? (R.tex.day ? R.tex.info : 'грузится…') : 'простая'} · запись ${REC.det.length} · ошибок ${S.errs}` + (m.why ? `\n${m.why}` : '');
   Object.assign(P0, S); S.maxGap = 0;
 }
 
 // ---------- запись ----------
 function recordJSON() {
   const set = track && track.getSettings ? track.getSettings() : {};
-  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, exp: EXP }, caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
+  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, exp: EXP, tex: TEX }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
     raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });
@@ -265,7 +274,9 @@ async function recordVideo(btn) {
 async function start() {
   $('start').style.display = 'none';
   try {
-    R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 1 });
+    R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0' });
+    if (TEX) R.loadEarth(`tex/`, TEX >= 2048 ? 2048 : 1024).then(() => log('текстуры Земли', R.tex.info, 'за', R.tex.ms.toFixed(0), 'мс'))
+      .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);
     worker.onerror = (e) => { S.errs++; log('ошибка потока:', e.message || e); };
