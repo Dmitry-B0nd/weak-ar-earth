@@ -129,9 +129,9 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.17';
-import { gmst, sunECI } from './orbit.js?v=0.17';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.17';
+import { createSats } from './sats.js?v=0.18';
+import { gmst, sunECI } from './orbit.js?v=0.18';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.18';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
@@ -149,7 +149,7 @@ export function createRenderer(canvas, o = {}) {
   const earth = mesh(sphere(0.45, -0.55)), frame = mesh(frameMesh(0.02));
   // спутники: задаются позже (данные грузятся), положения считает видеокарта
   let sats = null;
-  function setSats(list, groups) { sats = createSats(gl, list, groups); return sats; }
+  function setSats(list, groups, so) { sats = createSats(gl, list, groups, so); return sats; }
   // Земля с текстурами
   const pE = prog(gl, VS_E, (o.uvq ? '#define UVQ\n' : '') + FS_E), pH = prog(gl, VS_E, FS_H);
   const es = earthSphere();

@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.17';
-import { createRenderer } from './render.js?v=0.17';
-import { createPoseTrack } from './pose.js?v=0.17';
+import { BUILD } from './build.js?v=0.18';
+import { createRenderer } from './render.js?v=0.18';
+import { createPoseTrack } from './pose.js?v=0.18';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -61,6 +61,8 @@ async function checkSGP4(list) {
   log(SATINFO.check);
   if (w) log(`худший: ${w.name} — ${worst.e.toFixed(1)} px; оборотов/сут ${w.omm.MEAN_MOTION}, e ${w.omm.ECCENTRICITY}, MEAN_MOTION_DOT ${w.omm.MEAN_MOTION_DOT}, BSTAR ${w.omm.BSTAR}, эпоха ${w.omm.EPOCH}`);
 }
+// модели известных спутников: ?models=0 — точки, как раньше; ?msize=2 — модели вдвое крупнее
+const SOPT = { models: Q.get('models') !== '0', modelScale: +Q.get('msize') || 1 };
 async function loadSats() {
   const { fromOMM } = await import(`./orbit.js?v=${BUILD}`);
   const { syntheticList } = await import(`./sats.js?v=${BUILD}`);
@@ -70,10 +72,10 @@ async function loadSats() {
     try {
       const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
       const d = await r.json(), list = [];
-      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, group: s.group, cube: !!s.cube, el, omm: s.omm }); } catch (e) { /* пропуск */ } }
-      const sat = R.setSats(list, d.groups || {});
+      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm }); } catch (e) { /* пропуск */ } }
+      const sat = R.setSats(list, d.groups || {}, SOPT);
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
-      SATINFO.text = `${list.length} (известных ${sat.nCtx}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
+      SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}: ${sat.tris} треуг.` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
       log('спутники:', u, list.length, 'шт., данные', d.generated);
       setTimeout(() => checkSGP4(list).catch((e) => log('сверка SGP4:', e.message)), 3000);
       return;
@@ -318,7 +320,7 @@ function panelTick() {
 // ---------- запись ----------
 function recordJSON() {
   const set = track && track.getSettings ? track.getSettings() : {};
-  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, lights: R && R.opt ? R.opt.lights : null, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
+  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, sopt: SOPT, lights: R && R.opt ? R.opt.lights : null, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
     raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });

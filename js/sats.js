@@ -3,8 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.17';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.17';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.18';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.18';
+import { buildModel, modelKind } from './models.js?v=0.18';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -24,6 +25,7 @@ varying vec3 col;
 ${KEPLER}
 ${RS_GLSL}
 void main(){
+  if (e1.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; col = c; return; }   // вместо точки — модель
   vec3 p = satPos(e0, e1, dt);
   float along = dot(p, sunE); float side = length(p - along * sunE);
   col = c * ((along < 0.0 && side < 1.0) ? 0.3 : 1.0);           // в тени Земли — тусклый
@@ -50,6 +52,30 @@ ${RS_GLSL}
 void main(){ gl_Position = rsW(P * MV * vec4(p, 1.0)); }`;
 const FS_L = `precision mediump float; uniform vec4 c; void main(){ gl_FragColor = c; }`;
 
+// модели известных спутников: свет от Солнца (в тени Земли — только рассеянный), блеск, сетка ячеек на батареях
+const VS_M = `attribute vec3 p; attribute vec3 n; attribute vec4 c; attribute vec2 g;
+uniform mat4 P; uniform mat4 MV; uniform mat4 Mm;
+varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg;
+${RS_GLSL}
+void main(){ vec4 q = MV * (Mm * vec4(p, 1.0)); vv = q.xyz; vn = mat3(MV) * (mat3(Mm) * n); vc = c; vg = g; gl_Position = rsW(P * q); }`;
+const FS_M = (deriv) => `${deriv ? '#extension GL_OES_standard_derivatives : enable\n' : ''}precision mediump float;
+varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg;
+uniform vec3 sunV; uniform float lit;
+void main(){
+  vec3 N = normalize(vn), V = normalize(-vv);
+  if (dot(N, V) < 0.0) N = -N;                                   // тонкие панели видны с обеих сторон
+  float d = max(dot(N, sunV), 0.0);
+  float sp = pow(max(dot(N, normalize(sunV + V)), 0.0), 24.0) * vc.a;
+  vec3 base = vc.rgb;
+  if (vg.x >= 0.0) {                                              // сетка ячеек солнечной батареи
+    vec2 f = abs(fract(vg) - 0.5);
+    ${deriv ? 'vec2 w = fwidth(vg); float line = max(smoothstep(0.47 - w.x, 0.47, f.x), smoothstep(0.45 - w.y, 0.45, f.y)); line = mix(line, 0.12, smoothstep(0.25, 0.6, max(w.x, w.y)));' : 'float line = max(step(0.47, f.x), step(0.45, f.y));'}
+    base = mix(base, vec3(0.5, 0.52, 0.58), line * 0.6);
+  }
+  vec3 col = base * (0.35 + 0.9 * d * lit) + vec3(sp * lit * 0.8);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
 function prog(gl, vs, fs) {
   const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
   const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
@@ -71,7 +97,9 @@ export function syntheticList(n, now, seed = 7) {
 
 // list: [{ name, group, cube, el (fromOMM) }]; groups: { имя: { color } }
 export function createSats(gl, list, groups, o = {}) {
-  const opt = { ctxSize: 0.06, smallSize: 0.032, minPx: 3, maxPx: 40, orbitSeg: 160, rebase: 500, ...o };
+  const opt = { ctxSize: 0.06, smallSize: 0.032, minPx: 3, maxPx: 40, orbitSeg: 160, rebase: 500,
+    models: true, modelSize: 0.22, modelScale: 1, modelMinPx: 14, ...o };   // modelSize — наибольший размер модели в радиусах Земли;
+  // modelMinPx — меньше этого (css px) модель на экране не бывает: издалека её всё равно видно
   const pS = prog(gl, VS, FS), pT = prog(gl, VS_T, FS_T), pL = prog(gl, VS_L, FS_L);
   const n = list.length;
   const ctx = list.map((s, k) => (s.group === 'context' ? k : -1)).filter((k) => k >= 0);
@@ -105,6 +133,19 @@ export function createSats(gl, list, groups, o = {}) {
   gl.bindBuffer(gl.ARRAY_BUFFER, bT); gl.bufferData(gl.ARRAY_BUFFER, tq.byteLength, gl.DYNAMIC_DRAW);
   // орбиты известных
   const bO = gl.createBuffer(), seg = opt.orbitSeg, orb = new Float32Array(ctx.length * (seg + 1) * 3);
+  // модели известных
+  const deriv = !!gl.getExtension('OES_standard_derivatives');
+  const pM = opt.models && ctx.length ? prog(gl, VS_M, FS_M(deriv)) : null;
+  const SIZE = { iss: 1.45, css: 1.25, hubble: 0.9 };                  // станции крупнее, Хаббл мельче
+  const geo = {};                                                     // kind → { body, wing } на видеокарте
+  const up = (m) => { const vb = gl.createBuffer(), ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, m.v, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx, gl.STATIC_DRAW); return { vb, ib, n: m.idx.length }; };
+  const M = pM ? ctx.map((k) => {
+    const kind = modelKind(list[k].key, list[k].name);
+    if (!geo[kind]) { const b = buildModel(kind); geo[kind] = { body: up(b.body), wing: up(b.wing), ext: b.ext, tris: (b.body.idx.length + b.wing.idx.length) / 3 }; }
+    return { k, kind, g: geo[kind], scale: opt.modelSize * opt.modelScale * (SIZE[kind] || 1) / geo[kind].ext };
+  }) : [];
+  const tris = M.reduce((a, m) => a + m.g.tris, 0);
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // пересчёт элементов на момент t (мс модельного времени)
@@ -114,7 +155,7 @@ export function createSats(gl, list, groups, o = {}) {
     tRef = t; wallRef = wall;
     const date = sgp.size ? new Date(t) : null;
     for (let k = 0; k < n; k++) {
-      const size = list[k].group === 'context' ? opt.ctxSize : opt.smallSize;
+      const size = list[k].group === 'context' ? (opt.models ? 0 : opt.ctxSize) : opt.smallSize;
       const rec = sgp.get(k);
       if (rec) {
         let pv = null; try { pv = propagate(rec, date); } catch (e) { pv = null; }
@@ -148,6 +189,55 @@ export function createSats(gl, list, groups, o = {}) {
     gl.bindBuffer(gl.ARRAY_BUFFER, bO); gl.bufferData(gl.ARRAY_BUFFER, orb, gl.DYNAMIC_DRAW);
   }
 
+  // положение спутника k в сцене (ECI, радиусы Земли, «художественная» высота) — как в шейдере, но в двойной точности
+  function scenePos(k, dt) {
+    const e = el.subarray(k * 8, k * 8 + 8); if (e[0] <= 0) return null;
+    const p = posFrom(e[0], e[1], e[2], e[3], e[4], e[5] + e[6] * dt), r = Math.hypot(p[0], p[1], p[2]);
+    const R = 1 + 0.69 * Math.pow(Math.max(r - 1, 0), 0.324);
+    return [p[0] / r * R, p[1] / r * R, p[2] / r * R];
+  }
+  const Mm = new Float32Array(16), Mw = new Float32Array(16);
+  function drawModels(P, MV, sunE, dt, rs, F, dpr) {
+    gl.useProgram(pM); setRS(gl, pM, rs);
+    gl.uniformMatrix4fv(gl.getUniformLocation(pM, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pM, 'MV'), false, MV);
+    // Солнце в осях камеры
+    const sv = [MV[0] * sunE[0] + MV[4] * sunE[1] + MV[8] * sunE[2], MV[1] * sunE[0] + MV[5] * sunE[1] + MV[9] * sunE[2], MV[2] * sunE[0] + MV[6] * sunE[1] + MV[10] * sunE[2]];
+    const sl = Math.hypot(...sv); gl.uniform3f(gl.getUniformLocation(pM, 'sunV'), sv[0] / sl, sv[1] / sl, sv[2] / sl);
+    const uM = gl.getUniformLocation(pM, 'Mm'), uL = gl.getUniformLocation(pM, 'lit');
+    const ap = gl.getAttribLocation(pM, 'p'), an = gl.getAttribLocation(pM, 'n'), ac = gl.getAttribLocation(pM, 'c'), ag = gl.getAttribLocation(pM, 'g');
+    [ap, an, ac, ag].forEach((a) => gl.enableVertexAttribArray(a));
+    const bind = (part) => {
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.vb); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, part.ib);
+      gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 48, 0); gl.vertexAttribPointer(an, 3, gl.FLOAT, false, 48, 12);
+      gl.vertexAttribPointer(ac, 4, gl.FLOAT, false, 48, 24); gl.vertexAttribPointer(ag, 2, gl.FLOAT, false, 48, 40);
+    };
+    for (const m of M) {
+      const p = scenePos(m.k, dt), p1 = scenePos(m.k, dt + 1); if (!p || !p1) continue;
+      // оси модели: Z — к Земле, X — по полёту (без составляющей вдоль Z), Y = Z × X
+      const r = Math.hypot(...p), z = [-p[0] / r, -p[1] / r, -p[2] / r];
+      let x = [p1[0] - p[0], p1[1] - p[1], p1[2] - p[2]]; const xz = x[0] * z[0] + x[1] * z[1] + x[2] * z[2];
+      x = [x[0] - xz * z[0], x[1] - xz * z[1], x[2] - xz * z[2]]; const xl = Math.hypot(...x) || 1; x = x.map((v) => v / xl);
+      const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+      // не меньше modelMinPx на экране (F·0,45 — пикселей на радиус Земли на расстоянии 1 листа)
+      const zc = MV[2] * p[0] + MV[6] * p[1] + MV[10] * p[2] + MV[14], px = F * 0.45 * m.g.ext * m.scale / Math.max(zc, 1e-3);
+      const s = m.scale * Math.max(1, opt.modelMinPx * dpr / px);
+      Mm.set([x[0] * s, x[1] * s, x[2] * s, 0, y[0] * s, y[1] * s, y[2] * s, 0, z[0] * s, z[1] * s, z[2] * s, 0, p[0], p[1], p[2], 1]);
+      // тень Земли (цилиндр по направлению от Солнца)
+      const along = p[0] * sunE[0] + p[1] * sunE[1] + p[2] * sunE[2];
+      const side = Math.hypot(p[0] - along * sunE[0], p[1] - along * sunE[1], p[2] - along * sunE[2]);
+      gl.uniform1f(uL, along < 0 && side < 1 ? 0 : 1);
+      gl.uniformMatrix4fv(uM, false, Mm); bind(m.g.body); gl.drawElements(gl.TRIANGLES, m.g.body.n, gl.UNSIGNED_SHORT, 0);
+      // крылья: поворот вокруг Y модели лицом к Солнцу
+      const sx = sunE[0] * x[0] + sunE[1] * x[1] + sunE[2] * x[2], sz = sunE[0] * z[0] + sunE[1] * z[1] + sunE[2] * z[2];
+      const th = Math.atan2(sx, sz), c = Math.cos(th), sn = Math.sin(th);
+      // Mw = Mm · Ry(θ): новые оси X' = X·c − Z·sn, Z' = X·sn + Z·c
+      for (let q = 0; q < 3; q++) { Mw[q] = Mm[q] * c - Mm[8 + q] * sn; Mw[4 + q] = Mm[4 + q]; Mw[8 + q] = Mm[q] * sn + Mm[8 + q] * c; }
+      Mw[3] = Mw[7] = Mw[11] = 0; Mw[12] = p[0]; Mw[13] = p[1]; Mw[14] = p[2]; Mw[15] = 1;
+      if (m.g.wing.n) { gl.uniformMatrix4fv(uM, false, Mw); bind(m.g.wing); gl.drawElements(gl.TRIANGLES, m.g.wing.n, gl.UNSIGNED_SHORT, 0); }
+    }
+    [ap, an, ac, ag].forEach((a) => gl.disableVertexAttribArray(a));
+  }
+
   // t — модельное время (мс), wall — время страницы (мс), speed — ускорение; P, MV (оси Земли без суточного
   // вращения → камера); sunE — Солнце в осях Земли; F — фокус (px холста); vp — размер холста; dpr
   function draw(t, wall, speed, P, MV, sunE, F, vp, dpr, rs = null) {
@@ -178,6 +268,7 @@ export function createSats(gl, list, groups, o = {}) {
     gl.bindBuffer(gl.ARRAY_BUFFER, bC); gl.enableVertexAttribArray(ac); gl.vertexAttribPointer(ac, 3, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.POINTS, 0, n);
     gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1); gl.disableVertexAttribArray(ac);
+    if (M.length) drawModels(P, MV, sunE, dt, rs, F, dpr);
     // подписи
     if (L.length) {
       gl.useProgram(pT); setRS(gl, pT, rs);
@@ -198,5 +289,5 @@ export function createSats(gl, list, groups, o = {}) {
   }
   // перевести спутники (индексы в list) на SGP4: recs — satrec для каждого, prop — satellite.js propagate
   function useSGP(idx, recs, prop) { propagate = prop; idx.forEach((k, j) => sgp.set(k, recs[j])); tRef = 0; }
-  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; } };
+  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), tris };
 }
