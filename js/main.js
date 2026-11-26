@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.15';
-import { createRenderer } from './render.js?v=0.15';
-import { createPoseTrack } from './pose.js?v=0.15';
+import { BUILD } from './build.js?v=0.17';
+import { createRenderer } from './render.js?v=0.17';
+import { createPoseTrack } from './pose.js?v=0.17';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -359,7 +359,7 @@ async function start() {
   try {
     R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
+    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, BUILD).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);

@@ -60,9 +60,9 @@ void main(){
   col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
   col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
   // огни: в текстуре большинство светящихся точек тусклые (медиана 0,06), поэтому подъём тёмных (степень 0,75) и усиление;
-  // ниже ~0,035 — шум сжатия, он плавно гасится
+  // ниже ~0,03 — шум сжатия, он плавно гасится (полностью видно с 0,08)
   float nl = texture2D(tNight, uv0).r;
-  float lights = pow(max(nl - 0.035, 0.0) / 0.965, 0.75) * lightK * smoothstep(0.035, 0.07, nl);
+  float lights = pow(max(nl - 0.02, 0.0) / 0.98, 0.75) * lightK * smoothstep(0.03, 0.08, nl);
   col += vec3(1.0, 0.78, 0.45) * lights * (1.0 - dayF) * (1.0 - cl * 0.8);
   float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
@@ -129,9 +129,9 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.15';
-import { gmst, sunECI } from './orbit.js?v=0.15';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.15';
+import { createSats } from './sats.js?v=0.17';
+import { gmst, sunECI } from './orbit.js?v=0.17';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.17';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
@@ -195,10 +195,12 @@ export function createRenderer(canvas, o = {}) {
   }
   // загрузить текстуры Земли (размер дневной — 2048 или 1024). Каждая отдельно: без дневной Земля остаётся простой,
   // без огней или облаков — с картой, но без них; что не загрузилось и почему — в журнал.
-  async function loadEarth(base, size, log = () => {}) {
+  // ver — добавка к адресу (?v=сборка): файлы текстур меняются под тем же именем, а браузер держит их в кэше
+  async function loadEarth(base, size, log = () => {}, ver = '') {
     if (size > tex.maxSize) { log(`текстура ${size} больше предела видеокарты (${tex.maxSize}) — беру 2048`); size = 2048; }
     const mixSize = size >= 2048 ? 1024 : 512;
-    const res = await Promise.allSettled([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-night-${size}.jpg`, true), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
+    const q = ver ? `?v=${ver}` : '';
+    const res = await Promise.allSettled([loadTex(`${base}earth-day-${size}.jpg${q}`), loadTex(`${base}earth-night-${size}.jpg${q}`, true), loadTex(`${base}earth-mix-${mixSize}.jpg${q}`)]);
     const fails = res.filter((r) => r.status === 'rejected').map((r) => r.reason && r.reason.message || String(r.reason));
     fails.forEach((m) => log('текстура не загрузилась —', m));
     if (res[0].status !== 'fulfilled') throw new Error(fails[0] || 'дневная текстура');
