@@ -3,7 +3,8 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.12';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.13';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.13';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -21,12 +22,13 @@ const VS = `attribute vec4 e0; attribute vec4 e1; attribute vec3 c;
 uniform mat4 P; uniform mat4 MV; uniform float dt; uniform vec3 sunE; uniform float F; uniform vec2 pxr;
 varying vec3 col;
 ${KEPLER}
+${RS_GLSL}
 void main(){
   vec3 p = satPos(e0, e1, dt);
   float along = dot(p, sunE); float side = length(p - along * sunE);
   col = c * ((along < 0.0 && side < 1.0) ? 0.3 : 1.0);           // в тени Земли — тусклый
   vec4 q = MV * vec4(p, 1.0);
-  gl_Position = P * q;
+  gl_Position = rsW(P * q);
   gl_PointSize = clamp(F * e1.w / q.z, pxr.x, pxr.y);
 }`;
 const FS = `precision mediump float; varying vec3 col;
@@ -36,13 +38,16 @@ const VS_T = `attribute vec4 e0; attribute vec4 e1; attribute vec4 q;   // q: у
 uniform mat4 P; uniform mat4 MV; uniform float dt; uniform vec2 vp;
 varying vec2 uv;
 ${KEPLER}
+${RS_GLSL}
 void main(){
-  vec4 c = P * (MV * vec4(satPos(e0, e1, dt), 1.0));
+  vec4 c = rsW(P * (MV * vec4(satPos(e0, e1, dt), 1.0)));
   c.xy += q.xy * 2.0 / vp * c.w;
   gl_Position = c; uv = q.zw;
 }`;
 const FS_T = `precision mediump float; varying vec2 uv; uniform sampler2D t; void main(){ vec4 c = texture2D(t, uv); if (c.a < 0.02) discard; gl_FragColor = c; }`;
-const VS_L = `attribute vec3 p; uniform mat4 P; uniform mat4 MV; void main(){ gl_Position = P * MV * vec4(p, 1.0); }`;
+const VS_L = `attribute vec3 p; uniform mat4 P; uniform mat4 MV;
+${RS_GLSL}
+void main(){ gl_Position = rsW(P * MV * vec4(p, 1.0)); }`;
 const FS_L = `precision mediump float; uniform vec4 c; void main(){ gl_FragColor = c; }`;
 
 function prog(gl, vs, fs) {
@@ -145,13 +150,13 @@ export function createSats(gl, list, groups, o = {}) {
 
   // t — модельное время (мс), wall — время страницы (мс), speed — ускорение; P, MV (оси Земли без суточного
   // вращения → камера); sunE — Солнце в осях Земли; F — фокус (px холста); vp — размер холста; dpr
-  function draw(t, wall, speed, P, MV, sunE, F, vp, dpr) {
+  function draw(t, wall, speed, P, MV, sunE, F, vp, dpr, rs = null) {
     if (!tRef || wall - wallRef > opt.rebase || t < tRef) rebase(t, wall);
     if (ctx.length && Math.abs(t - lastOrbit) > 3600e3) { buildOrbits(t); lastOrbit = t; }
     const dt = (t - tRef) / 1000;
     // орбиты
     if (ctx.length) {
-      gl.useProgram(pL);
+      gl.useProgram(pL); setRS(gl, pL, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'MV'), false, MV);
       const ap = gl.getAttribLocation(pL, 'p');
       gl.bindBuffer(gl.ARRAY_BUFFER, bO); gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 0, 0);
@@ -160,7 +165,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(ap);
     }
     // точки
-    gl.useProgram(pS);
+    gl.useProgram(pS); setRS(gl, pS, rs);
     gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'MV'), false, MV);
     gl.uniform1f(gl.getUniformLocation(pS, 'dt'), dt);
     gl.uniform3f(gl.getUniformLocation(pS, 'sunE'), ...sunE);
@@ -175,7 +180,7 @@ export function createSats(gl, list, groups, o = {}) {
     gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1); gl.disableVertexAttribArray(ac);
     // подписи
     if (L.length) {
-      gl.useProgram(pT);
+      gl.useProgram(pT); setRS(gl, pT, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'MV'), false, MV);
       gl.uniform1f(gl.getUniformLocation(pT, 'dt'), dt);
       gl.uniform2f(gl.getUniformLocation(pT, 'vp'), vp[0] / (dpr * 0.42), vp[1] / (dpr * 0.42));   // буквы подписи ≈ 13 css px

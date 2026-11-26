@@ -6,7 +6,8 @@ const VS_BG = `attribute vec2 p; uniform vec4 uv; varying vec2 t;
 void main(){ t = uv.xy + (p * 0.5 + 0.5) * uv.zw; t.y = 1.0 - t.y; gl_Position = vec4(p, 0.0, 1.0); }`;
 const FS_BG = `precision mediump float; varying vec2 t; uniform sampler2D tex; void main(){ gl_FragColor = texture2D(tex, t); }`;
 const VS_M = `attribute vec3 p; attribute vec3 n; uniform mat4 P; uniform mat4 M; varying vec3 vn; varying vec3 on;
-void main(){ vn = mat3(M) * n; on = n; gl_Position = P * M * vec4(p, 1.0); }`;
+${RS_GLSL}
+void main(){ vn = mat3(M) * n; on = n; gl_Position = rsW(P * M * vec4(p, 1.0)); }`;
 const FS_M = `precision mediump float; varying vec3 vn; varying vec3 on; uniform vec4 col; uniform float grid;
 void main(){
   vec3 N = normalize(vn);
@@ -25,24 +26,40 @@ void main(){
 
 // Земля с текстурами: день (Blue Marble), ночные огни, облака и маска воды (упакованы в одну текстуру), солнце,
 // блик на воде, атмосфера по краю. Координаты вершины — единичная сфера Земли (z — к северу), uv — карта.
-const VS_E = `attribute vec3 p; attribute vec2 uv; uniform mat4 P; uniform mat4 MV; varying vec2 vuv; varying vec3 vn; varying vec3 vp;
-void main(){ vuv = uv; vec4 q = MV * vec4(p, 1.0); vp = q.xyz; vn = mat3(MV) * p; gl_Position = P * q; }`;
+const VS_E = `attribute vec3 p; attribute vec2 uv; uniform mat4 P; uniform mat4 MV; varying highp vec2 vuv; varying vec3 vn; varying vec3 vp;
+${RS_GLSL}
+void main(){ vuv = uv; vec4 q = MV * vec4(p, 1.0); vp = q.xyz; vn = mat3(MV) * p; gl_Position = rsW(P * q); }`;
+// Координаты карты — highp: в mediump (16 бит, так считают Mali) шаг по u в правой половине карты 1/2048 —
+// целая точка текстуры 2048 и две точки текстуры 4096, карта выходит ступеньками и мылом. UVQ — подделка mediump для проверки.
 const FS_E = `precision mediump float;
-varying vec2 vuv; varying vec3 vn; varying vec3 vp;
-uniform sampler2D tDay; uniform sampler2D tMix; uniform sampler2D tNight; uniform vec3 sun; uniform float cloudU;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+#define HP highp
+#else
+#define HP mediump
+#endif
+varying HP vec2 vuv; uniform HP float cloudU;
+varying vec3 vn; varying vec3 vp;
+uniform sampler2D tDay; uniform sampler2D tMix; uniform sampler2D tNight; uniform vec3 sun;
+#ifdef UVQ
+HP vec2 q16(HP vec2 x){ HP vec2 e = exp2(floor(log2(max(abs(x), 1e-6))) - 10.0); return floor(x / e + 0.5) * e; }
+#define UV(x) q16(x)
+#else
+#define UV(x) (x)
+#endif
 void main(){
   vec3 n = normalize(vn), v = normalize(-vp);
+  HP vec2 uv0 = UV(vuv); HP vec2 uvc = UV(vec2(vuv.x + cloudU, vuv.y));
   float ndl = dot(n, sun);
   float dayF = smoothstep(-0.12, 0.22, ndl);
-  vec3 day = texture2D(tDay, vuv).rgb;
-  vec4 mx = texture2D(tMix, vuv);
-  float cl = texture2D(tMix, vec2(vuv.x + cloudU, vuv.y)).g;
+  vec3 day = texture2D(tDay, uv0).rgb;
+  vec4 mx = texture2D(tMix, uv0);
+  float cl = texture2D(tMix, uvc).g;
   float dif = max(ndl, 0.0);
   vec3 col = day * (0.06 + 1.05 * dif);
   vec3 h = normalize(sun + v);
   col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
   col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
-  float lights = max(texture2D(tNight, vuv).r - 0.03, 0.0) * 1.15;   // срез: шум сжатия на тёмном не светится
+  float lights = max(texture2D(tNight, uv0).r - 0.03, 0.0) * 1.15;   // срез: шум сжатия на тёмном не светится
   col += vec3(1.0, 0.78, 0.45) * lights * (1.0 - dayF) * (1.0 - cl * 0.8);
   float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
@@ -50,7 +67,7 @@ void main(){
 }`;
 // ореол атмосферы: сфера чуть больше Земли, видны её задние грани, свечение тает к внешнему краю
 const FS_H = `precision mediump float;
-varying vec2 vuv; varying vec3 vn; varying vec3 vp; uniform vec3 sun; uniform float edge;
+varying vec3 vn; varying vec3 vp; uniform vec3 sun; uniform float edge;
 void main(){
   vec3 n = normalize(vn), v = normalize(-vp);
   float k = smoothstep(0.0, edge, -dot(n, v));
@@ -109,8 +126,9 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.12';
-import { gmst, sunECI } from './orbit.js?v=0.12';
+import { createSats } from './sats.js?v=0.13';
+import { gmst, sunECI } from './orbit.js?v=0.13';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.13';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, ...o };   // солнце — в осях листа
@@ -130,14 +148,14 @@ export function createRenderer(canvas, o = {}) {
   let sats = null;
   function setSats(list, groups) { sats = createSats(gl, list, groups); return sats; }
   // Земля с текстурами
-  const pE = prog(gl, VS_E, FS_E), pH = prog(gl, VS_E, FS_H);
+  const pE = prog(gl, VS_E, (o.uvq ? '#define UVQ\n' : '') + FS_E), pH = prog(gl, VS_E, FS_H);
   const es = earthSphere();
   const eb = { p: gl.createBuffer(), uv: gl.createBuffer(), i: gl.createBuffer(), count: es.idx.length };
   gl.bindBuffer(gl.ARRAY_BUFFER, eb.p); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(es.pos), gl.STATIC_DRAW);
   gl.bindBuffer(gl.ARRAY_BUFFER, eb.uv); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(es.uv), gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb.i); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(es.idx), gl.STATIC_DRAW);
   const aniso = gl.getExtension('EXT_texture_filter_anisotropic') || gl.getExtension('WEBKIT_EXT_texture_filter_anisotropic');
-  const tex = { day: null, mix: null, night: null, info: '', ms: 0 };
+  const tex = { day: null, mix: null, night: null, info: '', ms: 0, up: 0, kb: 0, maxSize: gl.getParameter(gl.MAX_TEXTURE_SIZE), hp: !!(gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT) || {}).precision };
   // текстура из файла: сначала запрос (чтобы видеть код ответа — 404 значит «файла нет на сайте»), потом картинка
   async function loadTex(url, gray) {
     const t0 = performance.now();
@@ -148,6 +166,7 @@ export function createRenderer(canvas, o = {}) {
     const img = new Image(), src = URL.createObjectURL(blob); img.src = src;
     try { await img.decode(); } catch (e) { URL.revokeObjectURL(src); throw new Error(`${url}: не раскодировалось (${blob.size} байт)`); }
     URL.revokeObjectURL(src);
+    const tu = performance.now();
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     const fmt = gray ? gl.LUMINANCE : gl.RGB;                // серая — байт на точку в памяти видеокарты
@@ -156,8 +175,10 @@ export function createRenderer(canvas, o = {}) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(4, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+    gl.finish();                                             // чтобы время отправки в видеокарту было честным
+    const up = performance.now() - tu; tex.up = Math.max(tex.up, up);
     tex.ms += performance.now() - t0;
-    return { t, w: img.width, h: img.height };
+    return { t, w: img.width, h: img.height, bytes: blob.size };
   }
   // запасная текстура 1×1 (если огни или облака не загрузились — Земля всё равно с картой)
   function tex1(rgb, gray) {
@@ -172,6 +193,7 @@ export function createRenderer(canvas, o = {}) {
   // загрузить текстуры Земли (размер дневной — 2048 или 1024). Каждая отдельно: без дневной Земля остаётся простой,
   // без огней или облаков — с картой, но без них; что не загрузилось и почему — в журнал.
   async function loadEarth(base, size, log = () => {}) {
+    if (size > tex.maxSize) { log(`текстура ${size} больше предела видеокарты (${tex.maxSize}) — беру 2048`); size = 2048; }
     const mixSize = size >= 2048 ? 1024 : 512;
     const res = await Promise.allSettled([loadTex(`${base}earth-day-${size}.jpg`), loadTex(`${base}earth-night-${size}.jpg`, true), loadTex(`${base}earth-mix-${mixSize}.jpg`)]);
     const fails = res.filter((r) => r.status === 'rejected').map((r) => r.reason && r.reason.message || String(r.reason));
@@ -180,6 +202,7 @@ export function createRenderer(canvas, o = {}) {
     const d = res[0].value, nt = res[1].status === 'fulfilled' ? res[1].value : null, m = res[2].status === 'fulfilled' ? res[2].value : null;
     tex.night = nt ? nt.t : tex1([0], true); tex.mix = m ? m.t : tex1([0, 0, 0]); tex.day = d.t;
     tex.info = `${d.w}×${d.h}${nt ? ` + огни ${nt.w}×${nt.h}` : ' (без огней)'}${m ? ` + ${m.w}×${m.h}` : ' (без облаков)'}`;
+    tex.kb = Math.round(res.reduce((a, r) => a + (r.status === 'fulfilled' ? r.value.bytes : 0), 0) / 1024);
   }
   // кольцо текстур с кадрами камеры
   const ring = [];
@@ -229,8 +252,15 @@ export function createRenderer(canvas, o = {}) {
     const P = [a, 0, 0, 0, 0, -b, 0, 0, 0, 0, (F + n) / (F - n), 1, 0, 0, -2 * F * n / (F - n), 0];   // по столбцам
     const R = pose.R, t = pose.t;
     const M = [R[0], R[3], R[6], 0, R[1], R[4], R[7], 0, R[2], R[5], R[8], 0, t[0], t[1], t[2], 1];
+    // бегущий затвор при рисовании: pose.prev — поза на pose.rs.dt мс раньше, pose.rs.k — время считывания (мс)
+    let rs = null;
+    if (pose.prev && pose.rs && (pose.rs.k[0] || pose.rs.k[1])) {
+      const R0 = pose.prev.R, t0 = pose.prev.t;
+      const M0 = [R0[0], R0[3], R0[6], 0, R0[1], R0[4], R0[7], 0, R0[2], R0[5], R0[8], 0, t0[0], t0[1], t0[2], 1];
+      rs = rsUniforms(P, M, M0, pose.rs.k, pose.rs.dt, cw / (2 * s * vw), ch / (2 * s * vh));
+    }
     gl.enable(gl.DEPTH_TEST); gl.clear(gl.DEPTH_BUFFER_BIT);
-    gl.useProgram(pM);
+    gl.useProgram(pM); setRS(gl, pM, rs);
     gl.uniformMatrix4fv(gl.getUniformLocation(pM, 'P'), false, P);
     gl.uniformMatrix4fv(gl.getUniformLocation(pM, 'M'), false, M);
     const lp = gl.getAttribLocation(pM, 'p'), ln = gl.getAttribLocation(pM, 'n');
@@ -252,10 +282,10 @@ export function createRenderer(canvas, o = {}) {
     const sunB0 = sunE ? [0, 1, 2].map((i) => EX[i] * sunE[0] + EY[i] * sunE[1] + EZ[i] * sunE[2]) : norm3(opt.sun);
     const drawSats = () => {
       if (!sats || !ck) return;
-      sats.draw(ck.t, wall, ck.speed, P, mul4(M, E0), sunE, s * f, [cw, ch], dpr);
+      sats.draw(ck.t, wall, ck.speed, P, mul4(M, E0), sunE, s * f, [cw, ch], dpr, rs);
     };
     if (!tex.day) {
-      gl.useProgram(pM); gl.enableVertexAttribArray(lp); gl.enableVertexAttribArray(ln);
+      gl.useProgram(pM); setRS(gl, pM, rs); gl.enableVertexAttribArray(lp); gl.enableVertexAttribArray(ln);
       drawMesh(earth, [0.15, 0.4, 0.8, 1], 1);
       gl.disableVertexAttribArray(lp); gl.disableVertexAttribArray(ln);
       drawSats();
@@ -267,7 +297,7 @@ export function createRenderer(canvas, o = {}) {
     const MV = mul4(M, E), MVh = mul4(M, earthModel(spinNow, 1.06));
     const sunB = sunB0, sunC = [R[0] * sunB[0] + R[1] * sunB[1] + R[2] * sunB[2], R[3] * sunB[0] + R[4] * sunB[1] + R[5] * sunB[2], R[6] * sunB[0] + R[7] * sunB[1] + R[8] * sunB[2]];
     const bindE = (pr) => {
-      gl.useProgram(pr);
+      gl.useProgram(pr); setRS(gl, pr, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pr, 'P'), false, P);
       gl.uniform3f(gl.getUniformLocation(pr, 'sun'), ...sunC);
       const ap = gl.getAttribLocation(pr, 'p'), au = gl.getAttribLocation(pr, 'uv');

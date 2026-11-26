@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.12';
-import { createRenderer } from './render.js?v=0.12';
-import { createPoseTrack } from './pose.js?v=0.12';
+import { BUILD } from './build.js?v=0.13';
+import { createRenderer } from './render.js?v=0.13';
+import { createPoseTrack } from './pose.js?v=0.13';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -13,6 +13,11 @@ const FOV = +Q.get('fov') || 66;                          // угол обзор
 const MAXDELAY = 160;                                     // мс: дольше кадр не ждёт своей позы
 // Опыт (выбирается один раз адресом): ?edge=stable — устойчивый набор краёв (не помог, оставлен для сравнения).
 const VOPT = { stableEdges: Q.get('edge') === 'stable' };
+// бегущий затвор: по умолчанию время считывания кадра оценивается само и запоминается в браузере (для этой камеры,
+// размера кадра и выдержки); ?rs=0 — без поправки, ?rs=-25 или ?rs=-25,0 — задать (мс по x, по y), ?rs=reset — забыть
+const RSQ = Q.get('rs');
+const RSI = { key: '', init: null, saved: 0, k: null };
+const RSDRAW = Q.get('rsdraw') !== '0', RSDT = 30;   // ?rsdraw=0 — поза с поправкой, но сцена рисуется без затвора
 // Короткая выдержка (8 мс): если камера разрешает ручную выдержку — по умолчанию (меньше смаз при рывках, выше частота
 // кадров). ?exp=0 — оставить автоматику камеры; ?exp=N — своя выдержка, N в единицах 100 мкс.
 const EXPQ = Q.get('exp');
@@ -132,10 +137,20 @@ async function setExposure(E) {
 }
 let CAPS = null;
 function gpuName() { try { const gl = R.gl, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); } catch (e) { return ''; } }
+function rsOpt(w, h) {
+  if (RSQ === '0') return { off: true };
+  if (RSQ && RSQ !== 'reset' && RSQ !== 'auto') { const v = RSQ.split(',').map(Number); return { fixed: [v[0] || 0, v[1] || 0] }; }
+  const dev = (track && track.getSettings && track.getSettings().deviceId) || '';
+  RSI.key = `lab-rs:${dev.slice(0, 16)}:${w}x${h}:${EXP}`; RSI.init = null;
+  try { if (RSQ === 'reset') localStorage.removeItem(RSI.key); else RSI.init = JSON.parse(localStorage.getItem(RSI.key) || 'null'); } catch (e) { }
+  if (RSI.init) log('затвор: из памяти', RSI.init.k.map((v) => v.toFixed(0)).join(', '), 'мс, вес', RSI.init.ev.toFixed(2));
+  return { init: RSI.init };
+}
 function setSize(w, h) {
   if (!w || !h || (w === vw && h === vh)) return;
   vw = w; vh = h; f0 = (Math.max(w, h) / 2) / Math.tan(FOV * Math.PI / 360);
   T.reset(); roiNext = null;
+  VOPT.rs = rsOpt(w, h);
   worker.postMessage({ type: 'cfg', W: w, H: h, f: f0, opt: VOPT });
   log('кадр', w + '×' + h, 'фокус', f0.toFixed(0), 'px');
 }
@@ -208,6 +223,7 @@ function newFrame(tf, ta, src, w, h) {
   }
 }
 
+const cornersPx = (h) => { const o = []; for (const [x, y] of [[0, 0], [1, 0], [1, 1], [0, 1]]) { const z = h[6] * x + h[7] * y + h[8]; o.push((h[0] * x + h[1] * y + h[2]) / z, (h[3] * x + h[4] * y + h[5]) / z); } return o; };
 function onResult(m) {
   busy = false;
   if (m.type === 'err') { S.errs++; log('поток:', m.msg); return; }
@@ -222,9 +238,15 @@ function onResult(m) {
     tf: +m.tf.toFixed(1), t: Math.round(now), n: m.n, tags: m.tags, err: +(m.err || 0).toFixed(3), mode: m.mode,
     H: m.H ? m.H.map((v) => +v.toPrecision(7)) : null, pts: m.pts ? m.pts.map((v) => +v.toFixed(2)) : null,
     ms: { grab: +m.grabMs.toFixed(1), vis: +m.visMs.toFixed(1), acq: +m.ms.acq.toFixed(1), coarse: +(m.ms.coarse || 0).toFixed(1), q: s ? +(now - s.t0).toFixed(1) : 0 },
-    roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, found: m.tr && m.tr.edges, vis: m.tr && m.tr.vis, rej: m.tr && m.tr.rej, why: m.why || undefined,
+    rs: m.rs, roi: [m.roi.x, m.roi.y, m.roi.w, m.roi.h], cell: +(m.cellPx || 0).toFixed(2), used: m.used, found: m.tr && m.tr.edges, vis: m.tr && m.tr.vis, rej: m.tr && m.tr.rej, why: m.why || undefined,
   });
-  if (m.R) T.add(m.tf, m.R, m.t);
+  // углы листа на кадре — для правила «при быстром движении достраивать позу только через короткий промежуток»
+  // (с 0.5 их сюда не передавали, и правило на странице не работало — только в прогоне по записям)
+  if (m.R) T.add(m.tf, m.R, m.t, m.H ? cornersPx(m.H) : undefined);
+  if (m.rs) {
+    RSI.k = m.rs;
+    if (RSI.key && m.rs[2] > 0.05 && now - RSI.saved > 3000) { RSI.saved = now; try { localStorage.setItem(RSI.key, JSON.stringify({ k: [m.rs[0], m.rs[1]], ev: Math.min(1, m.rs[2]) })); } catch (e) { } }
+  }
 }
 
 // ---------- показ ----------
@@ -256,7 +278,9 @@ function loop(now) {
   if (shown) { const g = now - S.lastShowT; if (g > S.maxGap) S.maxGap = g; }
   S.lastShowT = now;
   shown = pick;
-  const pose = T.poseAt(pick.tf);
+  let pose = T.poseAt(pick.tf);
+  // затвор при рисовании: поза на RSDT мс раньше даёт скорость точек сцены на кадре
+  if (pose && RSDRAW && RSI.k && (RSI.k[0] || RSI.k[1])) { const pv = T.poseAt(pick.tf - RSDT); if (pv) pose = { ...pose, prev: pv, rs: { k: RSI.k, dt: RSDT } }; }
   visible = !!pose;
   if (pose) S.shown++; else S.hidden++;
   S.delay += now - pick.ta; S.draws++;
@@ -283,7 +307,8 @@ function panelTick() {
     `камера ${vw}×${vh}, заказ ${CAMFPS} к/с (${set.frameRate ? set.frameRate.toFixed(0) : '?'}), факт ${(d('frames') / dt).toFixed(1)} к/с, интервал ${med.toFixed(0)} мс\n` +
     `зрение ${(d('res') / dt).toFixed(1)}/с: след ${d('track')} смаз ${d('blur')} поиск ${d('acq')} нет ${d('none')} · участок ${S.roi}\n` +
     `  поток ${(d('visMs') / res).toFixed(1)} мс (захват ${(d('grabMs') / res).toFixed(1)}, грубо ${(d('coarseMs') / res).toFixed(1)}, поиск ${(d('acqMs') / res).toFixed(1)}, поза ${(d('poseMs') / res).toFixed(1)}), главный ${(d('mainGrab') / Math.max(1, d('sent'))).toFixed(1)} мс\n` +
-    `метки ${m.tags || 0}/${tr.vis || 0} · лист ${sheetPx.toFixed(0)} px, клетка ${(m.cellPx || 0).toFixed(1)} px · края ${tr.used || 0}/${tr.edges || 0}, ошибка ${(m.err || 0).toFixed(2)} px\n` +
+    `метки ${m.tags || 0}/${tr.vis || 0} · лист ${sheetPx.toFixed(0)} px, клетка ${(m.cellPx || 0).toFixed(1)} px · края ${tr.used || 0}/${tr.edges || 0}, ошибка ${(m.err || 0).toFixed(2)} px` +
+    ` · затвор ${RSQ === '0' ? 'без поправки' : RSI.k ? `${RSI.k[0].toFixed(0)}/${RSI.k[1].toFixed(0)} мс` + (VOPT.rs && VOPT.rs.fixed ? ' (задано)' : ` (учтено ${RSI.k[3]}, вес ${RSI.k[2].toFixed(2)})`) : '…'}\n` +
     `показ ${(draws / dt).toFixed(1)} к/с (rAF ${(d('raf') / dt).toFixed(0)}, рисование ${(d('drawMs') / draws).toFixed(1)} мс), задержка ${(d('delay') / draws).toFixed(0)} мс, сцена ${(100 * d('shown') / draws).toFixed(0)}%, пауза max ${S.maxGap.toFixed(0)} мс\n` +
     `расстояние ${dist.toFixed(1)} листа · Земля ${TEX ? (R.tex.day ? R.tex.info : 'грузится…') : 'простая'} · спутники ${SATINFO.text}, время ×${SPEED}${SATINFO.check ? '\n' + SATINFO.check : ''} · запись ${REC.det.length} · ошибок ${S.errs}` + (m.why ? `\n${m.why}` : '');
   Object.assign(P0, S); S.maxGap = 0;
@@ -292,7 +317,7 @@ function panelTick() {
 // ---------- запись ----------
 function recordJSON() {
   const set = track && track.getSettings ? track.getSettings() : {};
-  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
+  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
     raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });
@@ -333,7 +358,7 @@ async function start() {
   try {
     R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock });
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, 'за', R.tex.ms.toFixed(0), 'мс'))
+    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);

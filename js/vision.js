@@ -2,12 +2,13 @@
 //   слежение — края меток около предсказанного положения листа, полное разрешение;
 //   поиск (только когда лист потерян) — js-aruco2 на уменьшенной вдвое картинке, затем то же уточнение краями.
 // На выходе — гомография «лист → пиксели кадра», углы подтверждённых меток и поза листа.
-import { AR, CV } from '../vendor/aruco.mjs?v=0.12';
-import { createTracker, hFrom4, cornersOf } from './track.js?v=0.12';
-import { createPoseEstimator } from './pose.js?v=0.12';
-import { createCoarse } from './coarse.js?v=0.12';
-import { tagCorners } from './board.js?v=0.12';
-import { applyH, fitH } from './geom.js?v=0.12';
+import { AR, CV } from '../vendor/aruco.mjs?v=0.13';
+import { createTracker, hFrom4, cornersOf } from './track.js?v=0.13';
+import { createPoseEstimator } from './pose.js?v=0.13';
+import { createCoarse } from './coarse.js?v=0.13';
+import { tagCorners } from './board.js?v=0.13';
+import { applyH, fitH } from './geom.js?v=0.13';
+import { createRollingShutter } from './rshutter.js?v=0.13';
 
 const now = () => performance.now();
 
@@ -16,13 +17,14 @@ export function createVision(o = {}) {
   const T = createTracker({ stable: !!o.stableEdges });
   const C = createCoarse();
   const P = createPoseEstimator();
+  const RS = createRollingShutter(o.rs || {});   // поправка бегущего затвора (только для позы; H в ответе — как на кадре)
   const det = new AR.Detector({ dictionaryName: 'APRILTAG_16h5', maxHammingDistance: 1 });
   let W = 0, Hh = 0, f = 0;
   const hist = [];                 // [{ tf, c: углы листа (8 чисел) }]
   const st = { mode: '', track: 0, acq: 0, lost: 0, why: '' };
   let half = null, halfImg = null, halfW = 0, halfH = 0;
 
-  function setCamera(w, h, f0) { W = w; Hh = h; f = f0; P.setCamera(w, h, f0); hist.length = 0; }
+  function setCamera(w, h, f0) { W = w; Hh = h; f = f0; P.setCamera(w, h, f0); RS.setCamera(w, h); hist.length = 0; }
 
   // где ждать лист на кадре tf (углы листа) — по двум последним результатам
   function predict(tf) {
@@ -140,19 +142,21 @@ export function createVision(o = {}) {
     const out = { tf, mode: mode || 'нет', why, ms: { all: 0, acq: acqMs, pose: 0, coarse: coarseMs }, n: 0, tags: 0, H: null, pts: null, err: 0, cellPx: T.st.cellPx, used: 0 };
     failed = !r;
     if (!r) blurRun = 0;
-    if (!r) { st.lost++; out.ms.all = t1 - t0; if (hist.length && tf - hist[hist.length - 1].tf > 250) hist.length = 0; return out; }
+    if (!r) { RS.push(out); st.lost++; out.ms.all = t1 - t0; if (hist.length && tf - hist[hist.length - 1].tf > 250) hist.length = 0; return out; }
     if (mode === 'след') st.track++; else st.acq++;
     blurRun = mode === 'смаз' ? blurRun + 1 : 0;
     const pts = new Float64Array(r.okTags.length * 16);
     let k = 0;
     for (const id of r.okTags) for (const [bx, by] of tagCorners(id)) { const q = applyH(r.H, bx, by); pts[k++] = bx; pts[k++] = by; pts[k++] = q[0]; pts[k++] = q[1]; }
     Object.assign(out, { H: r.H, pts, n: r.okTags.length * 4, tags: r.tagsOk, err: r.rms, used: r.used, cellPx: r.cellPx, contrast: r.contrast });
-    const pose = P.estimate(out);
+    const cor = RS.correct(out); RS.push(out);
+    const pose = P.estimate(cor);
+    out.rs = [Math.round(RS.k[0] * 10) / 10, Math.round(RS.k[1] * 10) / 10, +RS.evidence.toFixed(3), RS.n];
     const t2 = now();
     out.ms.pose = t2 - t1; out.ms.all = t2 - t0;
     if (pose) { out.R = pose.R; out.t = pose.t; out.poseErr = pose.err; }
     hist.push({ tf, c: cornersOf(r.H) }); if (hist.length > 3) hist.shift();
     return out;
   }
-  return { setCamera, process, roiFor, predict, st, tracker: T, poseEst: P };
+  return { setCamera, process, roiFor, predict, st, tracker: T, poseEst: P, rs: RS };
 }
