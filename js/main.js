@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.18';
-import { createRenderer } from './render.js?v=0.18';
-import { createPoseTrack } from './pose.js?v=0.18';
+import { BUILD } from './build.js?v=0.19';
+import { createRenderer } from './render.js?v=0.19';
+import { createPoseTrack } from './pose.js?v=0.19';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -25,6 +25,8 @@ let EXP = EXPQ === null ? 80 : +EXPQ || 0;
 let camReady = true;                                        // пока выдержка ставится — картинку не показываем
 // Земля с текстурами: ?tex=2048 (по умолчанию), ?tex=1024 (облегчённо), ?tex=0 — простая сфера без текстур
 // карта: 4096, если памяти телефона не меньше 3 ГБ (или браузер не говорит), иначе 2048; видеокарта, которая не берёт 4096, получит 2048
+// версия файлов текстур: меняется только когда меняются сами файлы (иначе каждая сборка заново качает ~2 МБ)
+const TEXV = '0.17';
 const TEX = Q.get('tex') === null ? (navigator.deviceMemory === undefined || navigator.deviceMemory >= 3 ? 4096 : 2048) : +Q.get('tex') || 0;
 // Спутники — по данным основного проекта (data/satellites.json: элементы CelesTrak). Берутся из репозитория
 // лаборатории (data/satellites.json), иначе с сайта основного проекта (тот же домен). ?satdata=адрес — свой файл;
@@ -62,7 +64,7 @@ async function checkSGP4(list) {
   if (w) log(`худший: ${w.name} — ${worst.e.toFixed(1)} px; оборотов/сут ${w.omm.MEAN_MOTION}, e ${w.omm.ECCENTRICITY}, MEAN_MOTION_DOT ${w.omm.MEAN_MOTION_DOT}, BSTAR ${w.omm.BSTAR}, эпоха ${w.omm.EPOCH}`);
 }
 // модели известных спутников: ?models=0 — точки, как раньше; ?msize=2 — модели вдвое крупнее
-const SOPT = { models: Q.get('models') !== '0', modelScale: +Q.get('msize') || 1 };
+const SOPT = { models: Q.get('models') !== '0', modelScale: +Q.get('msize') || 1, onModels: (n, ms) => log('модели готовы:', n, 'треуг. за', ms.toFixed(0), 'мс (в фоне)') };
 async function loadSats() {
   const { fromOMM } = await import(`./orbit.js?v=${BUILD}`);
   const { syntheticList } = await import(`./sats.js?v=${BUILD}`);
@@ -73,9 +75,10 @@ async function loadSats() {
       const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
       const d = await r.json(), list = [];
       for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm }); } catch (e) { /* пропуск */ } }
-      const sat = R.setSats(list, d.groups || {}, SOPT);
+      const tS = performance.now(); const sat = R.setSats(list, d.groups || {}, SOPT);
+      log('спутники подготовлены за', (performance.now() - tS).toFixed(0), 'мс');
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
-      SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}: ${sat.tris} треуг.` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
+      SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
       log('спутники:', u, list.length, 'шт., данные', d.generated);
       setTimeout(() => checkSGP4(list).catch((e) => log('сверка SGP4:', e.message)), 3000);
       return;
@@ -88,7 +91,7 @@ async function loadSats() {
 
 const $ = (id) => document.getElementById(id);
 const panel = $('panel'), canvas = $('gl'), video = $('video');
-const log = (...a) => { console.log(...a); LOGS.push(a.join(' ')); if (LOGS.length > 60) LOGS.shift(); };
+const log = (...a) => { console.log(...a); LOGS.push(`[${(performance.now() / 1000).toFixed(1)} с] ` + a.join(' ')); if (LOGS.length > 60) LOGS.shift(); };   // с временем от открытия страницы
 const LOGS = [];
 
 let R = null, worker = null, stream = null, track = null;
@@ -361,7 +364,7 @@ async function start() {
   try {
     R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, BUILD).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
+    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, TEXV).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);

@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.18';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.18';
-import { buildModel, modelKind } from './models.js?v=0.18';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.19';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.19';
+import { buildModel, modelKind } from './models.js?v=0.19';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -55,24 +55,36 @@ const FS_L = `precision mediump float; uniform vec4 c; void main(){ gl_FragColor
 // модели известных спутников: свет от Солнца (в тени Земли — только рассеянный), блеск, сетка ячеек на батареях
 const VS_M = `attribute vec3 p; attribute vec3 n; attribute vec4 c; attribute vec2 g;
 uniform mat4 P; uniform mat4 MV; uniform mat4 Mm;
-varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg;
+varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg; varying highp vec3 mp;
 ${RS_GLSL}
-void main(){ vec4 q = MV * (Mm * vec4(p, 1.0)); vv = q.xyz; vn = mat3(MV) * (mat3(Mm) * n); vc = c; vg = g; gl_Position = rsW(P * q); }`;
+void main(){ vec4 q = MV * (Mm * vec4(p, 1.0)); vv = q.xyz; vn = mat3(MV) * (mat3(Mm) * n); vc = c; vg = g; mp = p; gl_Position = rsW(P * q); }`;
 const FS_M = (deriv) => `${deriv ? '#extension GL_OES_standard_derivatives : enable\n' : ''}precision mediump float;
-varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+#define HP highp
+#else
+#define HP mediump
+#endif
+varying vec3 vn; varying vec3 vv; varying vec4 vc; varying vec2 vg; varying HP vec3 mp;
 uniform vec3 sunV; uniform float lit;
 void main(){
   vec3 N = normalize(vn), V = normalize(-vv);
   if (dot(N, V) < 0.0) N = -N;                                   // тонкие панели видны с обеих сторон
+  float foil = 0.0;
+  if (vg.x < -1.5) {                                              // плёнка-теплоизоляция: мятая, с бликами
+    HP vec3 q = mp * 2.6;
+    vec3 w = vec3(sin(q.x * 1.7 + q.y * 2.3) + sin(q.y * 3.1 - q.z * 1.3), sin(q.y * 1.9 + q.z * 2.9) + sin(q.z * 2.3 - q.x * 1.1),
+                  sin(q.z * 1.5 + q.x * 2.7) + sin(q.x * 3.3 - q.y * 1.7));
+    N = normalize(N + 0.22 * w); foil = 1.0;
+  }
   float d = max(dot(N, sunV), 0.0);
-  float sp = pow(max(dot(N, normalize(sunV + V)), 0.0), 24.0) * vc.a;
+  float sp = pow(max(dot(N, normalize(sunV + V)), 0.0), foil > 0.5 ? 12.0 : 24.0) * vc.a;
   vec3 base = vc.rgb;
   if (vg.x >= 0.0) {                                              // сетка ячеек солнечной батареи
     vec2 f = abs(fract(vg) - 0.5);
     ${deriv ? 'vec2 w = fwidth(vg); float line = max(smoothstep(0.47 - w.x, 0.47, f.x), smoothstep(0.45 - w.y, 0.45, f.y)); line = mix(line, 0.12, smoothstep(0.25, 0.6, max(w.x, w.y)));' : 'float line = max(step(0.47, f.x), step(0.45, f.y));'}
     base = mix(base, vec3(0.5, 0.52, 0.58), line * 0.6);
   }
-  vec3 col = base * (0.35 + 0.9 * d * lit) + vec3(sp * lit * 0.8);
+  vec3 col = base * (0.4 + 0.9 * d * lit) + vec3(sp * lit * 0.8);
   gl_FragColor = vec4(col, 1.0);
 }`;
 
@@ -140,12 +152,26 @@ export function createSats(gl, list, groups, o = {}) {
   const geo = {};                                                     // kind → { body, wing } на видеокарте
   const up = (m) => { const vb = gl.createBuffer(), ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, m.v, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx, gl.STATIC_DRAW); return { vb, ib, n: m.idx.length }; };
-  const M = pM ? ctx.map((k) => {
-    const kind = modelKind(list[k].key, list[k].name);
-    if (!geo[kind]) { const b = buildModel(kind); geo[kind] = { body: up(b.body), wing: up(b.wing), ext: b.ext, tris: (b.body.idx.length + b.wing.idx.length) / 3 }; }
-    return { k, kind, g: geo[kind], scale: opt.modelSize * opt.modelScale * (SIZE[kind] || 1) / geo[kind].ext };
-  }) : [];
-  const tris = M.reduce((a, m) => a + m.g.tris, 0);
+  // модели строятся в фоновом потоке и появляются по готовности; пока модели нет — видна точка
+  const M = pM ? ctx.map((k) => ({ k, kind: modelKind(list[k].key, list[k].name), g: null, scale: 0 })) : [];
+  const ready = new Set(); let tris = 0;
+  const t0 = performance.now();
+  function attach(b) {
+    geo[b.kind] = { body: up(b.body), wing: up(b.wing), ext: b.ext, tris: (b.body.idx.length + b.wing.idx.length) / 3 };
+    for (const m of M) if (m.kind === b.kind) { m.g = geo[b.kind]; m.scale = opt.modelSize * opt.modelScale * (SIZE[m.kind] || 1) / m.g.ext; ready.add(m.k); tris += m.g.tris; }
+    tRef = 0;                                                         // пересчитать: точку этого спутника — убрать
+    if (ready.size === M.length && opt.onModels) opt.onModels(tris, performance.now() - t0);
+  }
+  const kinds = [...new Set(M.map((m) => m.kind))];
+  const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
+  if (kinds.length) {
+    try {
+      const w = new Worker(new URL('./modelworker.js?v=0.19', import.meta.url), { type: 'module' });
+      let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
+      w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
+      w.postMessage(kinds);
+    } catch (e) { onMain(); }
+  }
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // пересчёт элементов на момент t (мс модельного времени)
@@ -155,7 +181,7 @@ export function createSats(gl, list, groups, o = {}) {
     tRef = t; wallRef = wall;
     const date = sgp.size ? new Date(t) : null;
     for (let k = 0; k < n; k++) {
-      const size = list[k].group === 'context' ? (opt.models ? 0 : opt.ctxSize) : opt.smallSize;
+      const size = list[k].group === 'context' ? (ready.has(k) ? 0 : opt.ctxSize) : opt.smallSize;
       const rec = sgp.get(k);
       if (rec) {
         let pv = null; try { pv = propagate(rec, date); } catch (e) { pv = null; }
@@ -212,6 +238,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.vertexAttribPointer(ac, 4, gl.FLOAT, false, 48, 24); gl.vertexAttribPointer(ag, 2, gl.FLOAT, false, 48, 40);
     };
     for (const m of M) {
+      if (!m.g) continue;
       const p = scenePos(m.k, dt), p1 = scenePos(m.k, dt + 1); if (!p || !p1) continue;
       // оси модели: Z — к Земле, X — по полёту (без составляющей вдоль Z), Y = Z × X
       const r = Math.hypot(...p), z = [-p[0] / r, -p[1] / r, -p[2] / r];
@@ -289,5 +316,5 @@ export function createSats(gl, list, groups, o = {}) {
   }
   // перевести спутники (индексы в list) на SGP4: recs — satrec для каждого, prop — satellite.js propagate
   function useSGP(idx, recs, prop) { propagate = prop; idx.forEach((k, j) => sgp.set(k, recs[j])); tRef = 0; }
-  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), tris };
+  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), get tris() { return tris; } };
 }
