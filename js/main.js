@@ -1,8 +1,8 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.13';
-import { createRenderer } from './render.js?v=0.13';
-import { createPoseTrack } from './pose.js?v=0.13';
+import { BUILD } from './build.js?v=0.14';
+import { createRenderer } from './render.js?v=0.14';
+import { createPoseTrack } from './pose.js?v=0.14';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -24,7 +24,8 @@ const EXPQ = Q.get('exp');
 let EXP = EXPQ === null ? 80 : +EXPQ || 0;
 let camReady = true;                                        // пока выдержка ставится — картинку не показываем
 // Земля с текстурами: ?tex=2048 (по умолчанию), ?tex=1024 (облегчённо), ?tex=0 — простая сфера без текстур
-const TEX = Q.get('tex') === null ? 2048 : +Q.get('tex') || 0;
+// карта: 4096, если памяти телефона не меньше 3 ГБ (или браузер не говорит), иначе 2048; видеокарта, которая не берёт 4096, получит 2048
+const TEX = Q.get('tex') === null ? (navigator.deviceMemory === undefined || navigator.deviceMemory >= 3 ? 4096 : 2048) : +Q.get('tex') || 0;
 // Спутники — по данным основного проекта (data/satellites.json: элементы CelesTrak). Берутся из репозитория
 // лаборатории (data/satellites.json), иначе с сайта основного проекта (тот же домен). ?satdata=адрес — свой файл;
 // ?sats=N — условный нагрузочный набор из N точек; ?sats=0 — без спутников. ?speed=120 — ускорение времени.
@@ -317,7 +318,7 @@ function panelTick() {
 // ---------- запись ----------
 function recordJSON() {
   const set = track && track.getSettings ? track.getSettings() : {};
-  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
+  return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, lights: R && R.opt ? R.opt.lights : null, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
     raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });
@@ -356,9 +357,9 @@ async function recordVideo(btn) {
 async function start() {
   $('start').style.display = 'none';
   try {
-    R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock });
+    R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
+    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);

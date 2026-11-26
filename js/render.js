@@ -39,7 +39,7 @@ const FS_E = `precision mediump float;
 #endif
 varying HP vec2 vuv; uniform HP float cloudU;
 varying vec3 vn; varying vec3 vp;
-uniform sampler2D tDay; uniform sampler2D tMix; uniform sampler2D tNight; uniform vec3 sun;
+uniform sampler2D tDay; uniform sampler2D tMix; uniform sampler2D tNight; uniform vec3 sun; uniform float lightK;
 #ifdef UVQ
 HP vec2 q16(HP vec2 x){ HP vec2 e = exp2(floor(log2(max(abs(x), 1e-6))) - 10.0); return floor(x / e + 0.5) * e; }
 #define UV(x) q16(x)
@@ -59,7 +59,10 @@ void main(){
   vec3 h = normalize(sun + v);
   col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
   col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
-  float lights = max(texture2D(tNight, uv0).r - 0.03, 0.0) * 1.15;   // срез: шум сжатия на тёмном не светится
+  // огни: в текстуре большинство светящихся точек тусклые (медиана 0,06), поэтому подъём тёмных (степень 0,6) и усиление;
+  // ниже ~0,035 — шум сжатия, он плавно гасится
+  float nl = texture2D(tNight, uv0).r;
+  float lights = pow(max(nl - 0.035, 0.0) / 0.965, 0.6) * lightK * smoothstep(0.035, 0.07, nl);
   col += vec3(1.0, 0.78, 0.45) * lights * (1.0 - dayF) * (1.0 - cl * 0.8);
   float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
@@ -126,12 +129,12 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.13';
-import { gmst, sunECI } from './orbit.js?v=0.13';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.13';
+import { createSats } from './sats.js?v=0.14';
+import { gmst, sunECI } from './orbit.js?v=0.14';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.14';
 
 export function createRenderer(canvas, o = {}) {
-  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, ...o };   // солнце — в осях листа
+  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.5, ...o };   // солнце — в осях листа
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false, depth: true, powerPreference: 'low-power', preserveDrawingBuffer: false, desynchronized: false });
   if (!gl) throw new Error('WebGL недоступен');
   const pBg = prog(gl, VS_BG, FS_BG), pM = prog(gl, VS_M, FS_M);
@@ -166,6 +169,7 @@ export function createRenderer(canvas, o = {}) {
     const img = new Image(), src = URL.createObjectURL(blob); img.src = src;
     try { await img.decode(); } catch (e) { URL.revokeObjectURL(src); throw new Error(`${url}: не раскодировалось (${blob.size} байт)`); }
     URL.revokeObjectURL(src);
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));   // по одной текстуре между кадрами — пауз несколько коротких, а не одна длинная
     const tu = performance.now();
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -175,8 +179,7 @@ export function createRenderer(canvas, o = {}) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(4, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
-    gl.finish();                                             // чтобы время отправки в видеокарту было честным
-    const up = performance.now() - tu; tex.up = Math.max(tex.up, up);
+    const up = performance.now() - tu;                       // время главного потока на передачу (без ожидания видеокарты) tex.up = Math.max(tex.up, up);
     tex.ms += performance.now() - t0;
     return { t, w: img.width, h: img.height, bytes: blob.size };
   }
@@ -311,6 +314,7 @@ export function createRenderer(canvas, o = {}) {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex.day); gl.uniform1i(gl.getUniformLocation(pE, 'tDay'), 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex.mix); gl.uniform1i(gl.getUniformLocation(pE, 'tMix'), 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tex.night); gl.uniform1i(gl.getUniformLocation(pE, 'tNight'), 2);
+      gl.uniform1f(gl.getUniformLocation(pE, 'lightK'), opt.lights);
     gl.uniform1f(gl.getUniformLocation(pE, 'cloudU'), (tsec / opt.cloudLen) % 1);
     gl.drawElements(gl.TRIANGLES, eb.count, gl.UNSIGNED_SHORT, 0);
     gl.activeTexture(gl.TEXTURE0);

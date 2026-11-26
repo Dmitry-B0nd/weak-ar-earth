@@ -3,8 +3,8 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.13';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.13';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.14';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.14';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
