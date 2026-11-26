@@ -59,10 +59,10 @@ void main(){
   vec3 h = normalize(sun + v);
   col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, h), 0.0), 48.0) * mx.b * 0.55 * dayF * (1.0 - cl);
   col = mix(col, vec3(1.0) * (0.05 + 0.95 * dif), cl * 0.85);
-  // огни: в текстуре большинство светящихся точек тусклые (медиана 0,06), поэтому подъём тёмных (степень 0,6) и усиление;
+  // огни: в текстуре большинство светящихся точек тусклые (медиана 0,06), поэтому подъём тёмных (степень 0,75) и усиление;
   // ниже ~0,035 — шум сжатия, он плавно гасится
   float nl = texture2D(tNight, uv0).r;
-  float lights = pow(max(nl - 0.035, 0.0) / 0.965, 0.6) * lightK * smoothstep(0.035, 0.07, nl);
+  float lights = pow(max(nl - 0.035, 0.0) / 0.965, 0.75) * lightK * smoothstep(0.035, 0.07, nl);
   col += vec3(1.0, 0.78, 0.45) * lights * (1.0 - dayF) * (1.0 - cl * 0.8);
   float fr = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += vec3(0.30, 0.55, 1.0) * fr * (0.15 + 0.85 * smoothstep(-0.3, 0.5, ndl));
@@ -129,12 +129,12 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.14';
-import { gmst, sunECI } from './orbit.js?v=0.14';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.14';
+import { createSats } from './sats.js?v=0.15';
+import { gmst, sunECI } from './orbit.js?v=0.15';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.15';
 
 export function createRenderer(canvas, o = {}) {
-  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.5, ...o };   // солнце — в осях листа
+  const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
   const gl = canvas.getContext('webgl', { antialias: true, alpha: false, depth: true, powerPreference: 'low-power', preserveDrawingBuffer: false, desynchronized: false });
   if (!gl) throw new Error('WebGL недоступен');
   const pBg = prog(gl, VS_BG, FS_BG), pM = prog(gl, VS_M, FS_M);

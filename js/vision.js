@@ -2,13 +2,13 @@
 //   слежение — края меток около предсказанного положения листа, полное разрешение;
 //   поиск (только когда лист потерян) — js-aruco2 на уменьшенной вдвое картинке, затем то же уточнение краями.
 // На выходе — гомография «лист → пиксели кадра», углы подтверждённых меток и поза листа.
-import { AR, CV } from '../vendor/aruco.mjs?v=0.14';
-import { createTracker, hFrom4, cornersOf } from './track.js?v=0.14';
-import { createPoseEstimator } from './pose.js?v=0.14';
-import { createCoarse } from './coarse.js?v=0.14';
-import { tagCorners } from './board.js?v=0.14';
-import { applyH, fitH } from './geom.js?v=0.14';
-import { createRollingShutter } from './rshutter.js?v=0.14';
+import { AR, CV } from '../vendor/aruco.mjs?v=0.15';
+import { createTracker, hFrom4, cornersOf } from './track.js?v=0.15';
+import { createPoseEstimator } from './pose.js?v=0.15';
+import { createCoarse } from './coarse.js?v=0.15';
+import { tagCorners } from './board.js?v=0.15';
+import { applyH, fitH } from './geom.js?v=0.15';
+import { createRollingShutter } from './rshutter.js?v=0.15';
 
 const now = () => performance.now();
 
