@@ -1,5 +1,5 @@
-import { PLACES, PLACE_CATS, ecef } from './places.js?v=0.25';
-import { gmst, sunECI } from './orbit.js?v=0.25';
+import { ecef } from './places.js?v=0.26';
+import { gmst, sunECI } from './orbit.js?v=0.26';
 // Выбор спутника или точки на Земле нажатием и карточка снизу (обычный HTML поверх сцены — текст чёткий, видеокарте ничего не стоит).
 // Нажатие ищет спутник по тому кадру, что сейчас на экране (render.pick); живые сведения — SGP4 для одного спутника
 // 3 раза в секунду по времени сцены.
@@ -49,7 +49,8 @@ export function createCard({ R, canvas, clock, log, rec, speed: speedOf = () => 
   // выбранное: { kind: 'sat' | 'place', k } или null; near — соседи по нажатию (такие же объекты)
   let list = [], extra = SMALL, cur = null, more = false, sat = null, timer = 0, near = [];
   const same = (a, b) => a && b && a.kind === b.kind && a.k === b.k;
-  const nameOf = (h) => (h.kind === 'place' ? PLACES[h.k].name : list[h.k] ? list[h.k].name : String(h.k));
+  const place = (k) => R.places.points[k] || {};
+  const nameOf = (h) => (h.kind === 'place' ? place(h.k).name : list[h.k] ? list[h.k].name : String(h.k));
 
   function setData(l, ex) {
     list = l; if (ex && ex.smallSat) extra = ex.smallSat;
@@ -95,12 +96,12 @@ export function createCard({ R, canvas, clock, log, rec, speed: speedOf = () => 
   function render() {
     let title = '', sub = '', desc = '', details = [], meta = [], links = [];
     if (cur.kind === 'place') {
-      const q = PLACES[cur.k];
-      title = q.name; sub = `${PLACE_CATS[q.cat].label} · ${q.country}`;
-      desc = q.text[0]; details = q.text.slice(1);
+      const q = place(cur.k), ty = R.places.types[q.type] || {};
+      title = q.name; sub = [ty.label, q.country].filter(Boolean).join(' · ');
+      desc = q.description || ''; details = Array.isArray(q.details) ? q.details : [];
+      for (const [a, b] of Object.entries(q.facts || {})) meta.push([esc(a), esc(b)]);
       const deg = (x, a, b) => Math.abs(x).toFixed(2).replace('.', ',') + '° ' + (x >= 0 ? a : b);
       meta.push(['Координаты', deg(q.lat, 'с. ш.', 'ю. ш.') + ', ' + deg(q.lon, 'в. д.', 'з. д.')]);
-      if (q.since) meta.push(['Даты', esc(q.since)]);
       links = (q.sats || []).map(findSat).filter((k) => k >= 0);
     } else {
       const s = list[cur.k] || {}, info = s.info || {}, ctx = s.group === 'context';
@@ -138,14 +139,14 @@ export function createCard({ R, canvas, clock, log, rec, speed: speedOf = () => 
     const rowsHtml = (rows) => rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
     try {
       if (h.kind === 'place') {
-        const q = PLACES[h.k], t = clock().t, g = gmst(t), e = ecef(q.lat, q.lon);
+        const q = place(h.k), t = clock().t, g = gmst(t), e = ecef(q.lat, q.lon);
         const p = [e[0] * Math.cos(g) - e[1] * Math.sin(g), e[0] * Math.sin(g) + e[1] * Math.cos(g), e[2]], su = sunECI(t);
         const elev = Math.asin(Math.max(-1, Math.min(1, p[0] * su[0] + p[1] * su[1] + p[2] * su[2]))) * 180 / Math.PI;
         const state = elev > 0 ? 'день' : elev > -6 ? 'сумерки' : 'ночь';
         tb.innerHTML = rowsHtml([['Сейчас там (по сцене)', `${state}, Солнце ${elev >= 0 ? 'на' : ''} ${Math.abs(Math.round(elev))}° ${elev >= 0 ? 'над горизонтом' : 'под горизонтом'}`]]);
         return;
       }
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.25');
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.26');
       if (h !== cur) return;
       const s = list[h.k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }

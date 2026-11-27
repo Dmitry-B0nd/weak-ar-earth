@@ -1,11 +1,10 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.25';
-import { createRenderer } from './render.js?v=0.25';
-import { createPoseTrack } from './pose.js?v=0.25';
-import { createCard } from './card.js?v=0.25';
-import { createUI } from './ui.js?v=0.25';
-import { PLACE_CATS } from './places.js?v=0.25';
+import { BUILD } from './build.js?v=0.26';
+import { createRenderer } from './render.js?v=0.26';
+import { createPoseTrack } from './pose.js?v=0.26';
+import { createCard } from './card.js?v=0.26';
+import { createUI } from './ui.js?v=0.26';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -398,10 +397,34 @@ function onView(v, key) {
   else if (key === 'now') { CLK.t0 = Date.now(); CLK.w0 = performance.now(); log('время сцены — текущее'); }
   else { applyView(); log('вид:', JSON.stringify(v)); }
 }
+// легенда: виды точек на Земле (только те, что есть в списке) и группы спутников
+let satGroups = {};
+function legend() {
+  const P = R.places, used = P ? new Set(P.points.map((q) => q.type)) : new Set();
+  UI.setLegend([...(P ? Object.entries(P.types).filter(([k]) => used.has(k)).map(([, t]) => [t.label, t.color]) : []),
+    ...Object.values(satGroups).filter((g) => g.label).map((g) => [g.label, g.color])]);
+}
 function afterSats(groups) {
   applyView();
   if (R.sats) UI.setCounts({ small: R.sats.nSmall || 0, cube: R.sats.nCube || 0 });
-  UI.setLegend([...(R.places ? Object.values(PLACE_CATS).map((c) => [c.label, c.color]) : []), ...Object.values(groups).filter((g) => g.label).map((g) => [g.label, g.color])]);
+  satGroups = groups; legend();
+}
+// точки на Земле: data/poi.json лаборатории (основной список), иначе — список основного проекта; ?poidata=адрес — свой
+async function loadPOI() {
+  const urls = Q.get('poidata') ? [Q.get('poidata')] : ['data/poi.json', '../ar-earth/data/poi.json'];
+  try {
+    for (const u of urls) {
+      try {
+        const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
+        const d = await r.json();
+        R.places.setData(d); legend();
+        const by = {}; for (const q of R.places.points) by[q.type] = (by[q.type] || 0) + 1;
+        log('точки на Земле:', u, R.places.n, 'шт.', JSON.stringify(by));
+        return;
+      } catch (e) { log('точки на Земле: не взял', u, e.message); }
+    }
+    log('точки на Земле: poi.json не найден — без точек');
+  } finally { UI.loaded(); }
 }
 UI.canFreeze = () => visible;
 UI.onFreeze = (on) => {
@@ -421,8 +444,7 @@ function prepare() {
   R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, places: Q.get('places') !== '0', ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
   CARD = createCard({ R, canvas, clock, log, rec: REC.sel, speed: () => SPEED });
   window.LAB = { R, CARD, UI };                                                            // для проверок из консоли
-  log('точки на Земле:', R.places ? R.places.n : 'выключены');
-  UI.setLegend(R.places ? Object.values(PLACE_CATS).map((c) => [c.label, c.color]) : []);
+  if (R.places) { UI.expect(1); loadPOI(); } else log('точки на Земле: выключены');
   if (TEX) {
     UI.expect(3);
     R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, TEXV, () => UI.loaded()).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
