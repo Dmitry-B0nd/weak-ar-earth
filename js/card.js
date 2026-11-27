@@ -1,4 +1,6 @@
-// Выбор спутника нажатием и карточка снизу (обычный HTML поверх сцены — текст чёткий, видеокарте ничего не стоит).
+import { PLACES, PLACE_CATS, ecef } from './places.js?v=0.23';
+import { gmst, sunECI } from './orbit.js?v=0.23';
+// Выбор спутника или точки на Земле нажатием и карточка снизу (обычный HTML поверх сцены — текст чёткий, видеокарте ничего не стоит).
 // Нажатие ищет спутник по тому кадру, что сейчас на экране (render.pick); живые сведения — SGP4 для одного спутника
 // 3 раза в секунду по времени сцены.
 
@@ -45,97 +47,123 @@ body.carded #bar { display: none; }
 export function createCard({ R, canvas, clock, log, rec, speed }) {
   const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
   const el = document.createElement('div'); el.id = 'card'; document.body.appendChild(el);
-  let list = [], extra = SMALL, sel = -1, more = false, sat = null, timer = 0, near = [];
+  // выбранное: { kind: 'sat' | 'place', k } или null; near — соседи по нажатию (такие же объекты)
+  let list = [], extra = SMALL, cur = null, more = false, sat = null, timer = 0, near = [];
+  const same = (a, b) => a && b && a.kind === b.kind && a.k === b.k;
+  const nameOf = (h) => (h.kind === 'place' ? PLACES[h.k].name : list[h.k] ? list[h.k].name : String(h.k));
 
   function setData(l, ex) {
     list = l; if (ex && ex.smallSat) extra = ex.smallSat;
     // прогрев: карточка собирается один раз невидимой (вёрстка, шрифты), SGP4 считается один раз — первое нажатие без фриза
     const k = list.findIndex((q) => q.group !== 'context');
-    if (k >= 0) setTimeout(() => { if (sel >= 0) return; sel = k; render(); live().then(() => { if (sel === k) { sel = -1; sat = null; el.innerHTML = ''; } }); }, 1500);
+    if (k >= 0) setTimeout(() => { if (cur) return; const w = { kind: 'sat', k }; cur = w; render(); live().then(() => { if (cur === w) { cur = null; sat = null; el.innerHTML = ''; } }); }, 1500);
   }
 
   // --- нажатие ---
-  let down = null;
+  let down = null, last = null;
   canvas.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
   canvas.addEventListener('pointerup', (e) => {
     if (!down) return; const d = down; down = null;
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 14 || performance.now() - d.t > 700) return;   // это не нажатие
     const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     const t0 = performance.now(), hits = R.pick(x, y, 36), ms = performance.now() - t0;
-    if (rec) rec.push([Math.round(t0), Math.round(x), Math.round(y), hits.length ? hits[0].k : -1, hits.length ? +hits[0].d.toFixed(1) : -1, hits.length, +ms.toFixed(2)]);
-    if (!hits.length) { select(-1); return; }
-    // известные — первыми, если палец рядом с ними (их и ищут чаще); повторное нажатие в то же место — следующий
-    const ctx = hits.filter((h) => list[h.k] && list[h.k].group === 'context' && h.d < 28);
-    let order = ctx.concat(hits.filter((h) => !ctx.includes(h))).map((h) => h.k);
-    const again = last && Math.hypot(x - last.x, y - last.y) < 24 && performance.now() - last.t < 8000 && order.includes(sel);
-    if (again) { const i = order.indexOf(sel); order = order.slice(i + 1).concat(order.slice(0, i + 1)); }
+    if (rec) rec.push([Math.round(t0), Math.round(x), Math.round(y), hits.length ? (hits[0].kind === 'place' ? 'p' + hits[0].k : hits[0].k) : -1, hits.length ? +hits[0].d.toFixed(1) : -1, hits.length, +ms.toFixed(2)]);
+    if (!hits.length) { select(null); return; }
+    // ближе 28 px: сначала известные спутники, потом точки на Земле, потом остальные; повторное нажатие туда же — следующий
+    const pri = (h) => (h.d < 28 ? (h.kind === 'sat' && list[h.k] && list[h.k].group === 'context' ? 0 : h.kind === 'place' ? 1 : 2) : 3);
+    let order = hits.slice().sort((a, b) => pri(a) - pri(b) || a.d - b.d).map((h) => ({ kind: h.kind, k: h.k }));
+    const again = last && Math.hypot(x - last.x, y - last.y) < 24 && performance.now() - last.t < 8000 && order.some((h) => same(h, cur));
+    if (again) { const i = order.findIndex((h) => same(h, cur)); order = order.slice(i + 1).concat(order.slice(0, i + 1)); }
     last = { x, y, t: performance.now() };
     near = order.slice(1, 5);
     select(order[0]);
   });
-  let last = null;
 
   // --- карточка ---
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  function select(k) {
-    sel = k; more = false; sat = null;
-    if (R.sats) R.sats.select(k);
+  function select(h) {
+    cur = h; more = false; sat = null;
+    if (R.sats) R.sats.select(h && h.kind === 'sat' ? h.k : -1);
+    if (R.places) R.places.select(h && h.kind === 'place' ? h.k : -1);
     clearInterval(timer);
-    if (k < 0) { el.classList.remove('on'); document.body.classList.remove('carded'); return; }
+    if (!h) { el.classList.remove('on'); document.body.classList.remove('carded'); return; }
     render(); el.classList.add('on'); document.body.classList.add('carded'); el.scrollTop = 0;
     live(); timer = setInterval(live, 333);
-    log('выбран:', list[k] ? list[k].name : k, near.length ? `(рядом ещё ${near.length})` : '');
+    log('выбран:', nameOf(h), near.length ? `(рядом ещё ${near.length})` : '');
   }
+  // спутник сцены по короткому имени («GOES» → GOES-19)
+  const findSat = (nm) => list.findIndex((q) => q.group === 'context' && (q.name === nm || q.name.startsWith(nm)));
   function render() {
-    const s = list[sel] || {}, info = s.info || {}, ctx = s.group === 'context';
-    const year = (info.launched || '').slice(0, 4);
-    const kind = ctx ? info.kind || 'Спутник' : s.cube ? 'Кубсат' : 'Малый спутник';
-    const desc = ctx ? info.description || '' : (s.cube ? extra.cubeDescription : extra.otherDescription).replace('{year}', year ? `, запущенный в ${year} году` : '');
-    const details = ctx ? info.details || [] : extra.details || [];
-    const meta = [];
-    if (info.operator) meta.push(['Оператор', esc(info.operator)]);
-    if (info.launched) meta.push(['Запуск', esc(info.launched.split('-').reverse().join('.'))]);
-    if (info.website) meta.push(['Сайт', `<a href="${esc(info.website)}" target="_blank" rel="noopener">${esc(info.website.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, ''))}</a>`]);
-    if (info.id || (s.omm && s.omm.NORAD_CAT_ID)) meta.push(['Номер NORAD', esc(info.id || s.omm.NORAD_CAT_ID)]);
+    let title = '', sub = '', desc = '', details = [], meta = [], links = [];
+    if (cur.kind === 'place') {
+      const q = PLACES[cur.k];
+      title = q.name; sub = `${PLACE_CATS[q.cat].label} · ${q.country}`;
+      desc = q.text[0]; details = q.text.slice(1);
+      const deg = (x, a, b) => Math.abs(x).toFixed(2).replace('.', ',') + '° ' + (x >= 0 ? a : b);
+      meta.push(['Координаты', deg(q.lat, 'с. ш.', 'ю. ш.') + ', ' + deg(q.lon, 'в. д.', 'з. д.')]);
+      if (q.since) meta.push(['Даты', esc(q.since)]);
+      links = (q.sats || []).map(findSat).filter((k) => k >= 0);
+    } else {
+      const s = list[cur.k] || {}, info = s.info || {}, ctx = s.group === 'context';
+      const year = (info.launched || '').slice(0, 4);
+      title = s.name || '—';
+      sub = (ctx ? info.kind || 'Спутник' : s.cube ? 'Кубсат' : 'Малый спутник') + (info.country ? ' · ' + countryName(info.country) : '');
+      desc = ctx ? info.description || '' : (s.cube ? extra.cubeDescription : extra.otherDescription).replace('{year}', year ? `, запущенный в ${year} году` : '');
+      details = ctx ? info.details || [] : extra.details || [];
+      if (info.operator) meta.push(['Оператор', esc(info.operator)]);
+      if (info.launched) meta.push(['Запуск', esc(info.launched.split('-').reverse().join('.'))]);
+      if (info.website) meta.push(['Сайт', `<a href="${esc(info.website)}" target="_blank" rel="noopener">${esc(info.website.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, ''))}</a>`]);
+      if (info.id || (s.omm && s.omm.NORAD_CAT_ID)) meta.push(['Номер NORAD', esc(info.id || s.omm.NORAD_CAT_ID)]);
+    }
+    const tbl = (rows) => `<table>${rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('')}</table>`;
     el.innerHTML = `<button class="x" aria-label="Закрыть">✕</button>
-      <h2>${esc(s.name || '—')}</h2>
-      <div class="sub">${esc(kind)}${info.country ? ' · ' + esc(countryName(info.country)) : ''}</div>
+      <h2>${esc(title)}</h2>
+      <div class="sub">${esc(sub)}</div>
       ${desc ? `<p>${esc(desc)}</p>` : ''}
       <table class="live"></table>
-      <div class="note">сведения — по времени сцены${speed > 1 ? ` (идёт в ${speed} раз быстрее)` : ''}</div>
+      ${cur.kind === 'sat' ? `<div class="note">сведения — по времени сцены${speed > 1 ? ` (идёт в ${speed} раз быстрее)` : ''}</div>` : ''}
+      ${links.length ? `<div class="chips links"><span class="note" style="align-self:center;width:100%">спутники сцены, связанные с этим местом:</span>${links.map((k) => `<button data-s="${k}">${esc(list[k].name)}</button>`).join('')}</div>` : ''}
       ${details.length || meta.length ? `<button class="more">${more ? 'Свернуть' : 'Подробнее'}</button>` : ''}
-      ${more ? details.map((p) => `<p>${esc(p)}</p>`).join('') + (meta.length ? `<table>${meta.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('')}</table>` : '') : ''}
-      ${near.length ? `<div class="chips"><span class="note" style="align-self:center;width:100%">рядом:</span>${near.map((k) => `<button data-k="${k}">${esc(list[k] ? list[k].name : k)}</button>`).join('')}</div>` : ''}`;
-    el.querySelector('.x').onclick = () => select(-1);
+      ${more ? details.map((p) => `<p>${esc(p)}</p>`).join('') + (meta.length ? tbl(meta) : '') : ''}
+      ${near.length ? `<div class="chips near"><span class="note" style="align-self:center;width:100%">рядом (ещё нажатие туда же — следующий):</span>${near.map((h, i) => `<button data-i="${i}">${esc(nameOf(h))}</button>`).join('')}</div>` : ''}`;
+    el.querySelector('.x').onclick = () => select(null);
     const mb = el.querySelector('.more'); if (mb) mb.onclick = () => { more = !more; render(); live(); };
-    el.querySelectorAll('.chips button').forEach((b) => { b.onclick = () => { const k = +b.dataset.k; near = near.filter((q) => q !== k).concat(sel >= 0 ? [sel] : []); select(k); }; });
-    if (near.length) el.querySelector('.chips .note').textContent = 'рядом (ещё нажатие туда же — следующий):';
+    el.querySelectorAll('.near button').forEach((b) => { b.onclick = () => { const h = near[+b.dataset.i]; near = near.filter((q) => q !== h).concat(cur ? [cur] : []); select(h); }; });
+    el.querySelectorAll('.links button').forEach((b) => { b.onclick = () => { near = cur ? [cur] : []; select({ kind: 'sat', k: +b.dataset.s }); }; });
   }
-  // живые сведения: SGP4 одного спутника (satellite.js грузится один раз при первом выборе)
+  // живые сведения: у спутника — SGP4 (satellite.js грузится один раз), у точки — день или ночь там сейчас
   let lib = null;
   async function live() {
-    if (sel < 0) return;
-    const k = sel, tb = el.querySelector('.live'); if (!tb) return;
+    if (!cur) return;
+    const h = cur, tb = el.querySelector('.live'); if (!tb) return;
+    const rowsHtml = (rows) => rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
     try {
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.22');
-      if (k !== sel) return;
-      const s = list[k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
+      if (h.kind === 'place') {
+        const q = PLACES[h.k], t = clock().t, g = gmst(t), e = ecef(q.lat, q.lon);
+        const p = [e[0] * Math.cos(g) - e[1] * Math.sin(g), e[0] * Math.sin(g) + e[1] * Math.cos(g), e[2]], su = sunECI(t);
+        const elev = Math.asin(Math.max(-1, Math.min(1, p[0] * su[0] + p[1] * su[1] + p[2] * su[2]))) * 180 / Math.PI;
+        const state = elev > 0 ? 'день' : elev > -6 ? 'сумерки' : 'ночь';
+        tb.innerHTML = rowsHtml([['Сейчас там (по сцене)', `${state}, Солнце ${elev >= 0 ? 'на' : ''} ${Math.abs(Math.round(elev))}° ${elev >= 0 ? 'над горизонтом' : 'под горизонтом'}`]]);
+        return;
+      }
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.23');
+      if (h !== cur) return;
+      const s = list[h.k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }
       const date = new Date(clock().t), pv = lib.propagate(sat, date);
-      if (!pv || !pv.position) { tb.innerHTML = '<tr><td>Положение</td><td>не считается (сошёл с орбиты?)</td></tr>'; return; }
+      if (!pv || !pv.position) { tb.innerHTML = rowsHtml([['Положение', 'не считается (сошёл с орбиты?)']]); return; }
       const p = pv.position, v = pv.velocity, g = lib.eciToGeodetic(p, lib.gstime(date));
       const lat = g.latitude * 180 / Math.PI, lon = ((g.longitude * 180 / Math.PI + 540) % 360) - 180;
       const deg = (x, a, b) => Math.abs(x).toFixed(1).replace('.', ',') + '° ' + (x >= 0 ? a : b);
       const per = 2 * Math.PI / sat.no;   // минут
-      const rows = [
+      tb.innerHTML = rowsHtml([
         ['Высота', Math.round(g.height).toLocaleString('ru-RU') + ' км'],
         ['Скорость', Math.hypot(v.x, v.y, v.z).toFixed(2).replace('.', ',') + ' км/с'],
         ['Виток', per < 120 ? Math.round(per) + ' мин' : (per / 60).toFixed(1).replace('.', ',') + ' ч'],
         ['Наклонение орбиты', (sat.inclo * 180 / Math.PI).toFixed(1).replace('.', ',') + '°'],
         ['Сейчас над точкой', deg(lat, 'с. ш.', 'ю. ш.') + ', ' + deg(lon, 'в. д.', 'з. д.')],
-      ];
-      tb.innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
-    } catch (e) { tb.innerHTML = `<tr><td>Сведения</td><td>ошибка: ${esc(e.message)}</td></tr>`; }
+      ]);
+    } catch (e) { tb.innerHTML = rowsHtml([['Сведения', 'ошибка: ' + esc(e.message)]]); }
   }
-  return { setData, select, get selected() { return sel; } };
+  return { setData, select, get selected() { return cur; } };
 }

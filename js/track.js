@@ -1,8 +1,8 @@
 // Слежение за листом по известному рисунку: края клеток всех меток ищутся в полном разрешении вдоль нормали
 // около предсказанного положения, по ним уточняется гомография «лист → пиксели» (8 чисел, через 4 угла листа).
 // Проверка: по найденной гомографии читаются клетки меток; лист принят, если коды совпали.
-import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.22';
-import { applyH, solveSPD } from './geom.js?v=0.22';
+import { buildEdges, tagCorners, cellOf, NTAG, CELL } from './board.js?v=0.23';
+import { applyH, solveSPD } from './geom.js?v=0.23';
 
 const SHEET = [[0, 0], [1, 0], [1, 1], [0, 1]];
 

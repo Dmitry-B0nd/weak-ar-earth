@@ -129,9 +129,10 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.22';
-import { gmst, sunECI } from './orbit.js?v=0.22';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.22';
+import { createSats } from './sats.js?v=0.23';
+import { gmst, sunECI } from './orbit.js?v=0.23';
+import { RS_GLSL, setRS, rsUniforms, inv4 } from './rshutter.js?v=0.23';
+import { createPlaces } from './places.js?v=0.23';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
@@ -235,9 +236,10 @@ export function createRenderer(canvas, o = {}) {
   }
   // выбор нажатием: спутники в радиусе rCss (css px холста) от точки (x, y), не закрытые Землёй, ближние — первыми
   let lastView = null;
+  const places = o.places === false ? null : createPlaces(gl);
   function pick(x, y, rCss) {
-    if (!sats || !lastView) return [];
-    const { P, MV, cw, ch, dpr, F, t } = lastView, pos = sats.positions(t), out = [];
+    if (!lastView) return [];
+    const { P, MV, cw, ch, dpr, F, t } = lastView, pos = sats ? sats.positions(t) : [], out = [];
     const tr = (p, w) => [0, 1, 2].map((i) => MV[i] * p[0] + MV[4 + i] * p[1] + MV[8 + i] * p[2] + MV[12 + i] * w);
     const C = tr([0, 0, 0], 1), Re = Math.hypot(...tr([1, 0, 0], 0));   // Земля в осях камеры
     for (let k = 0; k < pos.length; k++) {
@@ -249,8 +251,15 @@ export function createRenderer(canvas, o = {}) {
       const sx = (cx / w + 1) / 2 * cw / dpr, sy = (1 - cy / w) / 2 * ch / dpr;
       const rm = pos[k].r ? F / dpr * Math.hypot(...tr([pos[k].r, 0, 0], 0)) / q[2] : 0;   // модель: можно попасть в любую её часть
       const dist = Math.hypot(sx - x, sy - y);
-      if (dist <= Math.max(rCss, rm)) out.push({ k, d: dist, z: q[2], sx, sy });
+      if (dist <= Math.max(rCss, rm)) out.push({ kind: 'sat', k, d: dist, z: q[2], sx, sy });
     }
+    if (places) places.positions(lastView.spin, lastView.camE).forEach((pp, k) => {
+      if (pp.vis < 0.35) return;                                       // у горизонта и за ним — не выбирается
+      const q = tr(pp.p, 1); if (q[2] <= 0.01) return;
+      const sx = ((P[0] * q[0] + P[8] * q[2]) / q[2] + 1) / 2 * cw / dpr, sy = (1 - (P[5] * q[1] + P[9] * q[2]) / q[2]) / 2 * ch / dpr;
+      const dist = Math.hypot(sx - x, sy - y);
+      if (dist <= rCss) out.push({ kind: 'place', k, d: dist, z: q[2], sx, sy });
+    });
     return out.sort((a, b) => a.d - b.d);
   }
   // кадр + сцена. slot — запись кольца; pose — { R, t } или null; f — фокус кадра в пикселях
@@ -305,11 +314,12 @@ export function createRenderer(canvas, o = {}) {
     const EX = ax(0), EY = ax(4), EZ = ax(8);
     const sunE = ck ? sunECI(ck.t) : null;                    // Солнце в осях Земли (ECI)
     const sunB0 = sunE ? [0, 1, 2].map((i) => EX[i] * sunE[0] + EY[i] * sunE[1] + EZ[i] * sunE[2]) : norm3(opt.sun);
+    const MVe = mul4(M, E0), Mi = inv4(MVe), camE = Mi ? [Mi[12] / Mi[15], Mi[13] / Mi[15], Mi[14] / Mi[15]] : [0, 0, 10];
     const drawSats = () => {
+      if (places) places.draw(P, MVe, spinNow, camE, dpr, rs);       // точки на Земле — после Земли, до спутников
+      lastView = { P, MV: MVe, cw, ch, dpr, F: s * f, t: ck ? ck.t : 0, spin: spinNow, camE };   // для выбора нажатием — то, что показано
       if (!sats || !ck) return;
-      const MV = mul4(M, E0);
-      sats.draw(ck.t, wall, ck.speed, P, MV, sunE, s * f, [cw, ch], dpr, rs);
-      lastView = { P, MV, cw, ch, dpr, F: s * f, t: ck.t };           // для выбора нажатием — ровно то, что показано
+      sats.draw(ck.t, wall, ck.speed, P, MVe, sunE, s * f, [cw, ch], dpr, rs);
     };
     if (!tex.day) {
       gl.useProgram(pM); setRS(gl, pM, rs); gl.enableVertexAttribArray(lp); gl.enableVertexAttribArray(ln);
@@ -364,5 +374,5 @@ export function createRenderer(canvas, o = {}) {
     const X = X0.map((v, i) => v * c + Y0[i] * s), Y = Y0.map((v, i) => -X0[i] * s + v * c);
     return [X[0] * r, X[1] * r, X[2] * r, 0, Y[0] * r, Y[1] * r, Y[2] * r, 0, Z[0] * r, Z[1] * r, Z[2] * r, 0, 0, 0, -0.55, 1];
   }
-  return { gl, upload, draw, ring, setDpr(d) { dpr = d; }, loadEarth, tex, opt, setSats, get sats() { return sats; }, pick };
+  return { gl, upload, draw, ring, setDpr(d) { dpr = d; }, loadEarth, tex, opt, setSats, get sats() { return sats; }, get places() { return places; }, pick };
 }

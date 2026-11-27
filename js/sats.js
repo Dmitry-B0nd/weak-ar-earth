@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.22';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.22';
-import { buildModel, modelKind } from './models.js?v=0.22';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.23';
+import { RS_GLSL, setRS, inv4 } from './rshutter.js?v=0.23';
+import { buildModel, modelKind } from './models.js?v=0.23';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -18,45 +18,54 @@ vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел
   vec3 p = vec3(xp * co - yp * ci * so, xp * so + yp * ci * co, yp * si);
   float r = length(p);
   return p / r * (1.0 + 0.69 * pow(max(r - 1.0, 0.0), 0.324));   // «художественная» высота
+}
+// уход за Землю: 1 — виден, 0 — закрыт; у края диска плавно (а не обрезается краем Земли)
+uniform vec3 camE;
+float limbFade(vec3 p) {
+  vec3 d = p - camE; float L = length(d); d /= L;
+  float tc = -dot(camE, d);
+  if (tc <= 0.0 || tc >= L) return 1.0;                 // ближайшая к центру точка луча — за спутником: он перед Землёй
+  return smoothstep(1.0, 1.07, length(camE + d * tc));
 }`;
 const VS = `attribute vec4 e0; attribute vec4 e1; attribute vec3 c;
 uniform mat4 P; uniform mat4 MV; uniform float dt; uniform vec3 sunE; uniform float F; uniform vec2 pxr;
-varying vec3 col;
+varying vec3 col; varying float fade;
 ${KEPLER}
 ${RS_GLSL}
 void main(){
-  if (e1.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; col = c; return; }   // вместо точки — модель
+  if (e1.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; col = c; fade = 0.0; return; }   // вместо точки — модель
   vec3 p = satPos(e0, e1, dt);
-  float along = dot(p, sunE); float side = length(p - along * sunE);
-  col = c * ((along < 0.0 && side < 1.0) ? 0.3 : 1.0);           // в тени Земли — тусклый
+  col = c; fade = limbFade(p);                                    // одним цветом; за Землю уходит плавно
+  if (fade <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
   vec4 q = MV * vec4(p, 1.0);
   gl_Position = rsW(P * q);
   gl_PointSize = clamp(F * e1.w / q.z, pxr.x, pxr.y);
 }`;
-const FS = `precision mediump float; varying vec3 col;
-void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d, d); if (r > 0.25) discard; gl_FragColor = vec4(col * (r > 0.16 ? 0.75 : 1.0), 1.0); }`;
+const FS = `precision mediump float; varying vec3 col; varying float fade;
+void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d) * 2.0; float a = (1.0 - smoothstep(0.82, 1.0, r)) * fade; if (a < 0.01) discard; gl_FragColor = vec4(col * a, a); }`;
 // кольцо выбранного спутника: точка постоянного размера (px) вокруг его положения
 const VS_R = `attribute vec4 e0; attribute vec4 e1;
-uniform mat4 P; uniform mat4 MV; uniform float dt; uniform float px;
+uniform mat4 P; uniform mat4 MV; uniform float dt; uniform float px; varying float fade;
 ${KEPLER}
 ${RS_GLSL}
-void main(){ vec4 q = MV * vec4(satPos(e0, e1, dt), 1.0); gl_Position = rsW(P * q); gl_PointSize = px; }`;
-const FS_R = `precision mediump float; uniform float pf; uniform float ca;   // pf — тот же размер (точность в шейдерах разная); ca — яркость
+void main(){ vec3 p = satPos(e0, e1, dt); fade = limbFade(p); vec4 q = MV * vec4(p, 1.0); gl_Position = rsW(P * q); gl_PointSize = px; }`;
+const FS_R = `precision mediump float; uniform float pf; uniform float ca; varying float fade;   // pf — тот же размер (точность в шейдерах разная); ca — яркость
 void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d) * pf, R = pf * 0.5;
-  float a = smoothstep(R - 4.0, R - 2.5, r) * (1.0 - smoothstep(R - 1.5, R, r)) * ca; if (a < 0.01) discard;
+  float a = smoothstep(R - 4.0, R - 2.5, r) * (1.0 - smoothstep(R - 1.5, R, r)) * ca * fade; if (a < 0.01) discard;
   gl_FragColor = vec4(vec3(a), a); }`;
 // подписи: прямоугольник постоянного экранного размера справа сверху от точки
 const VS_T = `attribute vec4 e0; attribute vec4 e1; attribute vec4 q;   // q: угол (px), uv
 uniform mat4 P; uniform mat4 MV; uniform float dt; uniform vec2 vp;
-varying vec2 uv;
+varying vec2 uv; varying float fade;
 ${KEPLER}
 ${RS_GLSL}
 void main(){
-  vec4 c = rsW(P * (MV * vec4(satPos(e0, e1, dt), 1.0)));
+  vec3 p = satPos(e0, e1, dt); fade = limbFade(p);
+  vec4 c = rsW(P * (MV * vec4(p, 1.0)));
   c.xy += q.xy * 2.0 / vp * c.w;
   gl_Position = c; uv = q.zw;
 }`;
-const FS_T = `precision mediump float; varying vec2 uv; uniform sampler2D t; void main(){ vec4 c = texture2D(t, uv); if (c.a < 0.02) discard; gl_FragColor = c; }`;
+const FS_T = `precision mediump float; varying vec2 uv; varying float fade; uniform sampler2D t; void main(){ vec4 c = texture2D(t, uv) * fade; if (c.a < 0.02) discard; gl_FragColor = c; }`;
 const VS_L = `attribute vec3 p; uniform mat4 P; uniform mat4 MV;
 ${RS_GLSL}
 void main(){ gl_Position = rsW(P * MV * vec4(p, 1.0)); }`;
@@ -179,7 +188,7 @@ export function createSats(gl, list, groups, o = {}) {
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.22', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.23', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);
@@ -188,7 +197,7 @@ export function createSats(gl, list, groups, o = {}) {
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // выбранный спутник: кольцо, его орбита, у малых — модель вместо точки
-  let sel = -1, selM = null, selOrbitT = -1e18, warm = 0;
+  let sel = -1, selM = null, selOrbitT = -1e18, warm = 0, lastCam = [0, 0, 10];
   const bOs = gl.createBuffer(), orbS = new Float32Array((seg + 1) * 3);
   const isCtx = (k) => list[k].group === 'context';
   // пересчёт элементов на момент t (мс модельного времени)
@@ -290,6 +299,8 @@ export function createSats(gl, list, groups, o = {}) {
     if (!tRef || wall - wallRef > opt.rebase || t < tRef) rebase(t, wall);
     if (ctx.length && Math.abs(t - lastOrbit) > 3600e3) { buildOrbits(t); lastOrbit = t; }
     const dt = (t - tRef) / 1000;
+    const Mi = inv4(MV), camE = Mi ? [Mi[12] / Mi[15], Mi[13] / Mi[15], Mi[14] / Mi[15]] : [0, 0, 10];   // камера в осях Земли
+    lastCam = camE;
     // орбиты
     if (ctx.length) {
       gl.useProgram(pL); setRS(gl, pL, rs);
@@ -315,7 +326,7 @@ export function createSats(gl, list, groups, o = {}) {
     gl.useProgram(pS); setRS(gl, pS, rs);
     gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'MV'), false, MV);
     gl.uniform1f(gl.getUniformLocation(pS, 'dt'), dt);
-    gl.uniform3f(gl.getUniformLocation(pS, 'sunE'), ...sunE);
+    gl.uniform3f(gl.getUniformLocation(pS, 'sunE'), ...sunE); gl.uniform3f(gl.getUniformLocation(pS, 'camE'), ...camE);
     gl.uniform1f(gl.getUniformLocation(pS, 'F'), F * 0.45);           // размер в радиусах Земли → ширины листа
     gl.uniform2f(gl.getUniformLocation(pS, 'pxr'), opt.minPx * dpr, opt.maxPx * dpr);
     const a0 = gl.getAttribLocation(pS, 'e0'), a1 = gl.getAttribLocation(pS, 'e1'), ac = gl.getAttribLocation(pS, 'c');
@@ -323,7 +334,9 @@ export function createSats(gl, list, groups, o = {}) {
     gl.enableVertexAttribArray(a0); gl.vertexAttribPointer(a0, 4, gl.FLOAT, false, 32, 0);
     gl.enableVertexAttribArray(a1); gl.vertexAttribPointer(a1, 4, gl.FLOAT, false, 32, 16);
     gl.bindBuffer(gl.ARRAY_BUFFER, bC); gl.enableVertexAttribArray(ac); gl.vertexAttribPointer(ac, 3, gl.FLOAT, false, 0, 0);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawArrays(gl.POINTS, 0, n);
+    gl.disable(gl.BLEND);
     gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1); gl.disableVertexAttribArray(ac);
     if (M.length || selM) drawModels(P, MV, sunE, dt, rs, F, dpr);
     // прогрев (один кадр, когда модели готовы): модели малых и кольцо рисуются в 1 пиксель — драйвер готовит всё
@@ -345,7 +358,7 @@ export function createSats(gl, list, groups, o = {}) {
     if (rings.length) {
       gl.useProgram(pR); setRS(gl, pR, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'MV'), false, MV);
-      gl.uniform1f(gl.getUniformLocation(pR, 'dt'), dt);
+      gl.uniform1f(gl.getUniformLocation(pR, 'dt'), dt); gl.uniform3f(gl.getUniformLocation(pR, 'camE'), ...camE);
       const a0 = gl.getAttribLocation(pR, 'e0'), a1 = gl.getAttribLocation(pR, 'e1');
       gl.bindBuffer(gl.ARRAY_BUFFER, bE);
       gl.enableVertexAttribArray(a0); gl.vertexAttribPointer(a0, 4, gl.FLOAT, false, 32, 0);
@@ -362,7 +375,7 @@ export function createSats(gl, list, groups, o = {}) {
     if (L.length) {
       gl.useProgram(pT); setRS(gl, pT, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'MV'), false, MV);
-      gl.uniform1f(gl.getUniformLocation(pT, 'dt'), dt);
+      gl.uniform1f(gl.getUniformLocation(pT, 'dt'), dt); gl.uniform3f(gl.getUniformLocation(pT, 'camE'), ...camE);
       gl.uniform2f(gl.getUniformLocation(pT, 'vp'), vp[0] / (dpr * 0.42), vp[1] / (dpr * 0.42));   // буквы подписи ≈ 13 css px
       const b0 = gl.getAttribLocation(pT, 'e0'), b1 = gl.getAttribLocation(pT, 'e1'), bq = gl.getAttribLocation(pT, 'q');
       gl.bindBuffer(gl.ARRAY_BUFFER, bT);
