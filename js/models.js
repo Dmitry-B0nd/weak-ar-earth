@@ -87,19 +87,19 @@ function mesh() {
   }
   // солнечная батарея в плоскости XY: лицевая сторона (+Z; крылья поворачиваются так, что +Z смотрит на Солнце) — ячейки с сеткой, обратная — светлая, рамка
   function panel(c, sx, sy, cells) {
-    const [x, y, z] = c, a = sx / 2, b = sy / 2, h = 0.06;
+    const [x, y, z] = c, a = sx / 2, b = sy / 2, h = Math.min(0.06, Math.min(sx, sy) * 0.02);   // толщина — от размера
     const [gx, gy] = sx >= sy ? cells : [cells[1], cells[0]];
     quad([x - a, y - b, z + h], [x + a, y - b, z + h], [x + a, y + b, z + h], [x - a, y + b, z + h], [0, 0, 1], C.cell, 0.7, [0, 0], [gx, 0], [gx, gy], [0, gy]);
     quad([x - a, y + b, z - h], [x + a, y + b, z - h], [x + a, y - b, z - h], [x - a, y - b, z - h], [0, 0, -1], C.back, 0.25, [0, gy], [gx, gy], [gx, 0], [0, 0]);   // изнанка — плёнка-основа
     // рамка
-    const f = Math.min(sx, sy) * 0.03 + 0.05;
+    const f = Math.min(Math.min(sx, sy) * 0.03 + 0.05, Math.min(sx, sy) * 0.1);   // у маленьких панелей рамка тоньше
     box([x, y - b, z], [sx + f, f, h * 3], C.grey, 0.3); box([x, y + b, z], [sx + f, f, h * 3], C.grey, 0.3);
     box([x - a, y, z], [f, sy, h * 3], C.grey, 0.3); box([x + a, y, z], [f, sy, h * 3], C.grey, 0.3);
   }
   // крыло из нескольких панелей вдоль ±Y (sgn) от точки y0, с ярмом-штангой
-  function wing(sgn, y0, n, px, py, cells, gap = 0.25, z = 0) {
-    box([0, sgn * (y0 + 0.6), z], [0.25, 1.2, 0.25], C.grey, 0.3);
-    for (let k = 0; k < n; k++) panel([0, sgn * (y0 + 1.2 + py / 2 + k * (py + gap)), z], px, py, cells);
+  function wing(sgn, y0, n, px, py, cells, gap = 0.25, z = 0, yoke = 1.2) {
+    box([0, sgn * (y0 + yoke / 2), z], [yoke * 0.2, yoke, yoke * 0.2], C.grey, 0.3);
+    for (let k = 0; k < n; k++) panel([0, sgn * (y0 + yoke + py / 2 + k * (py + gap)), z], px, py, cells);
   }
   // ферма-решётка вдоль Y длиной L, сечение w×w
   function truss(c, L, w, col = C.grey) {
@@ -116,7 +116,21 @@ function mesh() {
     box(c, [sx, 0.12, sz], C.rad, 0.15);
     for (let k = 1; k < ribs; k++) box([c[0] - sx / 2 + sx * k / ribs, c[1], c[2]], [0.08, 0.2, sz], C.grey, 0.2);
   }
-  return { v, idx, box, cyl, lathe, module, sphere, dish, panel, wing, truss, radiator };
+  // корпус кубсата: 4 боковые грани в солнечных ячейках (сетка), торцы — алюминий, по рёбрам — направляющие
+  function cellBox(c, s, cells) {
+    const [x, y, z] = c, [a, b, h] = [s[0] / 2, s[1] / 2, s[2] / 2];
+    const P = (i, j, k) => [x + i * a, y + j * b, z + k * h];
+    const [gl, gw] = cells;    // ячеек вдоль X и поперёк
+    quad(P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1), [0, 0, 1], C.cell, 0.7, [0, 0], [gl, 0], [gl, gw], [0, gw]);
+    quad(P(-1, 1, -1), P(1, 1, -1), P(1, -1, -1), P(-1, -1, -1), [0, 0, -1], C.cell, 0.7, [0, gw], [gl, gw], [gl, 0], [0, 0]);
+    quad(P(1, 1, -1), P(-1, 1, -1), P(-1, 1, 1), P(1, 1, 1), [0, 1, 0], C.cell, 0.7, [gl, 0], [0, 0], [0, gw], [gl, gw]);
+    quad(P(-1, -1, -1), P(1, -1, -1), P(1, -1, 1), P(-1, -1, 1), [0, -1, 0], C.cell, 0.7, [0, 0], [gl, 0], [gl, gw], [0, gw]);
+    quad(P(1, -1, -1), P(1, 1, -1), P(1, 1, 1), P(1, -1, 1), [1, 0, 0], C.silver, 0.6);
+    quad(P(-1, 1, -1), P(-1, -1, -1), P(-1, -1, 1), P(-1, 1, 1), [-1, 0, 0], C.silver, 0.6);
+    const r = Math.min(s[1], s[2]) * 0.09;
+    for (const [i, j] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) box([x, y + i * (b - r / 2), z + j * (h - r / 2)], [s[0] * 1.04, r * 1.05, r * 1.05], C.silver, 0.6);
+  }
+  return { v, idx, box, cyl, lathe, module, sphere, dish, panel, wing, truss, radiator, cellBox };
 }
 
 // ---------- модели ----------
@@ -210,6 +224,24 @@ function leo(B, W, o) {
   const [L, Wd, n] = o.wing;
   for (let k = 0; k < n; k++) W.panel([0, -(by / 2 + 1.9 + (L / n) / 2 + k * (L / n + 0.15)), 0], Wd, L / n, [Math.round(Wd * 3), Math.round(L / n * 3)]);
 }
+// кубсат 3U (30 × 10 × 10 см) с двумя раскрытыми крыльями и антеннами-усами
+function cube3(B, W) {
+  B.cellBox([0, 0, 0], [0.34, 0.1, 0.1], [6, 2]);
+  for (const s of [-1, 1]) B.box([0.12, s * 0.05, 0.05 + 0.12], [0.004, 0.004, 0.24], C.silver, 0.5);   // антенны к Земле
+  B.box([-0.12, 0, -0.05 - 0.15], [0.004, 0.004, 0.3], C.silver, 0.5);
+  B.cyl('x', [0.175, 0, 0], 0.025, 0.01, C.black, 0.2, 10);            // объектив камеры
+  for (const s of [-1, 1]) { W.box([0, s * 0.055, 0], [0.3, 0.012, 0.012], C.silver, 0.5); W.panel([0, s * 0.11, 0], 0.32, 0.09, [6, 2]); W.panel([0, s * 0.205, 0], 0.32, 0.09, [6, 2]); }
+}
+// малый спутник (не кубсат): корпус в плёнке ~0,5 м, два крыла, антенна
+function micro(B, W) {
+  B.box([0, 0, 0], [0.5, 0.4, 0.45], C.gold, 0.6, 'foil');
+  B.radiator([0, 0.205, 0], 0.4, 0.35, 4);
+  B.box([0.1, 0, 0.27], [0.18, 0.18, 0.1], C.white, 0.2);
+  B.dish([-0.12, -0.08, 0.235], 0.09, [0, 0, 1]);
+  B.box([0.27, 0.1, -0.1], [0.04, 0.06, 0.06], C.dark, 0.2);
+  for (const s of [-1, 1]) W.wing(s, 0.2, 2, 0.4, 0.35, [5, 4], 0.04, 0, 0.1);
+}
+
 const KINDS = {
   iss: [/(^|[^a-z])iss([^a-z]|$)|мкс|zarya/i, iss],
   css: [/(^|[^a-z])css([^a-z]|$)|тяньгун|tiangong|tianhe/i, css],
@@ -221,6 +253,8 @@ const KINDS = {
   noaa: [/(noaa|jpss)/i, (B, W) => leo(B, W, { bus: [4.4, 1.9, 1.9], wing: [8, 1.9, 4], inst: [['scan', 0.25, 0, 0], ['drum', -0.15, 0.25, 0.45], ['box', -0.2, -0.25, [1, 0.7, 0.8]], ['dish', -0.42, 0.3, 0.35]] })],
   fengyun3: [/(фэнъюнь|fengyun|fy-3)/i, (B, W) => leo(B, W, { bus: [4.4, 2, 2], wing: [9, 2.4, 4], inst: [['scan', 0.2, 0.1, 0], ['box', -0.2, 0.2, [1.2, 0.7, 0.7]], ['drum', -0.1, -0.25, 0.4], ['dish', -0.4, -0.2, 0.4]] })],
   terra: [/terra/i, (B, W) => leo(B, W, { bus: [6.8, 3.5, 3.5], wing: [9, 5, 3], inst: [['box', 0.3, 0.25, [1.6, 1.2, 1.2]], ['scan', 0.05, -0.2, 0], ['box', -0.2, 0.2, [1.4, 1.4, 1.5]], ['box', -0.35, -0.25, [1, 1, 0.8]], ['dish', 0.4, -0.3, 0.6]] })],
+  cube3: [/^cube3$/, cube3],
+  micro: [/^micro$/, micro],
   aqua: [/aqua/i, (B, W) => leo(B, W, { bus: [4.8, 2.7, 2.7], wing: [12, 3.5, 4], inst: [['dish', 0.25, 0, 0.8], ['scan', -0.1, 0.2, 0], ['drum', -0.25, -0.25, 0.45], ['box', 0.0, -0.3, [0.9, 0.8, 0.7]]] })],
 };
 export function modelKind(key, name) {

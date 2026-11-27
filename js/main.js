@@ -1,8 +1,9 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.19';
-import { createRenderer } from './render.js?v=0.19';
-import { createPoseTrack } from './pose.js?v=0.19';
+import { BUILD } from './build.js?v=0.20';
+import { createRenderer } from './render.js?v=0.20';
+import { createPoseTrack } from './pose.js?v=0.20';
+import { createCard } from './card.js?v=0.20';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -74,8 +75,13 @@ async function loadSats() {
     try {
       const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
       const d = await r.json(), list = [];
-      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm }); } catch (e) { /* пропуск */ } }
+      for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm, info: s }); } catch (e) { /* пропуск */ } }
       const tS = performance.now(); const sat = R.setSats(list, d.groups || {}, SOPT);
+      // тексты для карточек малых спутников — рядом с данными (satellites-extra.json основного проекта)
+      let extra = null;
+      try { const re = await fetch(new URL('satellites-extra.json', new URL(u, location.href)), { cache: 'no-cache' }); if (re.ok) extra = await re.json(); } catch (e) { /* нет — запасные тексты */ }
+      if (CARD) CARD.setData(list, extra);
+      log('карточки:', extra ? 'тексты из satellites-extra.json' : 'satellites-extra.json не найден — короткие тексты');
       log('спутники подготовлены за', (performance.now() - tS).toFixed(0), 'мс');
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
       SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
@@ -97,7 +103,8 @@ const LOGS = [];
 let R = null, worker = null, stream = null, track = null;
 let vw = 0, vh = 0, f0 = 0;
 const T = createPoseTrack();
-const REC = { frames: [], det: [], show: [] }; const RECMAX = 40000;
+const REC = { frames: [], det: [], show: [], sel: [] };   // sel: [время, x, y, спутник, расстояние px, попаданий, мс]
+let CARD = null; const RECMAX = 40000;
 const S = {                                               // счётчики для панели
   frames: 0, raf: 0, drawMs: 0, res: 0, track: 0, blur: 0, acq: 0, none: 0, coarseMs: 0, visMs: 0, grabMs: 0, acqMs: 0, poseMs: 0, mainGrab: 0, sent: 0,
   shown: 0, hidden: 0, delay: 0, draws: 0, lastRes: null, fmt: '', roi: '', camDt: [], maxGap: 0, lastShowT: 0, errs: 0,
@@ -326,7 +333,7 @@ function recordJSON() {
   return JSON.stringify({ build: BUILD, engine: 'lab', cap: CAP, fmt: S.fmt, opt: { ...VOPT, sopt: SOPT, lights: R && R.opt ? R.opt.lights : null, rsq: RSQ, rsKey: RSI.key, rsInit: RSI.init, exp: EXP, tex: TEX, sats: SATS, speed: SPEED, satinfo: SATINFO.text }, gpu: gpuName(), caps: CAPS, camNow: track && track.getSettings ? track.getSettings() : null, ua: navigator.userAgent, at: new Date().toISOString(),
     cam: [vw, vh], f: f0, fov: FOV, camSettings: { w: set.width, h: set.height, fps: set.frameRate, req: [CAMW, CAMH, CAMFPS] },
     screen: [innerWidth, innerHeight, devicePixelRatio], cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, logs: LOGS,
-    raw: { frames: REC.frames, det: REC.det, show: REC.show, o: [], m: [] } });
+    raw: { frames: REC.frames, det: REC.det, show: REC.show, sel: REC.sel, o: [], m: [] } });
 }
 async function shareFile(name, blob, type) {
   const file = new File([blob], name, { type });
@@ -338,7 +345,7 @@ async function saveRecord() {
   const name = `lab-${BUILD}-${new Date().toISOString().slice(5, 19).replace(/[:T]/g, '-')}.json`;
   await shareFile(name, new Blob([recordJSON()], { type: 'application/json' }), 'application/json');
 }
-function clearRecord() { REC.frames.length = 0; REC.det.length = 0; REC.show.length = 0; log('запись очищена'); }
+function clearRecord() { REC.frames.length = 0; REC.det.length = 0; REC.show.length = 0; REC.sel.length = 0; log('запись очищена'); }
 // видео с камеры (для разбора кадров у себя): 10 с
 async function recordVideo(btn) {
   if (!window.MediaRecorder) { log('MediaRecorder недоступен'); return; }
@@ -363,6 +370,8 @@ async function start() {
   $('start').style.display = 'none';
   try {
     R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
+    CARD = createCard({ R, canvas, clock, log, rec: REC.sel, speed: SPEED });
+    window.LAB = { R, CARD };                              // для проверок из консоли
     if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
     if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, TEXV).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
       .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });

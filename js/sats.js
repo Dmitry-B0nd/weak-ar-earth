@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.19';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.19';
-import { buildModel, modelKind } from './models.js?v=0.19';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.20';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.20';
+import { buildModel, modelKind } from './models.js?v=0.20';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -35,6 +35,16 @@ void main(){
 }`;
 const FS = `precision mediump float; varying vec3 col;
 void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d, d); if (r > 0.25) discard; gl_FragColor = vec4(col * (r > 0.16 ? 0.75 : 1.0), 1.0); }`;
+// кольцо выбранного спутника: точка постоянного размера (px) вокруг его положения
+const VS_R = `attribute vec4 e0; attribute vec4 e1;
+uniform mat4 P; uniform mat4 MV; uniform float dt; uniform float px;
+${KEPLER}
+${RS_GLSL}
+void main(){ vec4 q = MV * vec4(satPos(e0, e1, dt), 1.0); gl_Position = rsW(P * q); gl_PointSize = px; }`;
+const FS_R = `precision mediump float; uniform float pf;   // тот же размер, своя переменная (точность в шейдерах разная)
+void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d) * pf, R = pf * 0.5;
+  float a = smoothstep(R - 4.0, R - 2.5, r) * (1.0 - smoothstep(R - 1.5, R, r)); if (a < 0.01) discard;
+  gl_FragColor = vec4(vec3(a), a); }`;
 // подписи: прямоугольник постоянного экранного размера справа сверху от точки
 const VS_T = `attribute vec4 e0; attribute vec4 e1; attribute vec4 q;   // q: угол (px), uv
 uniform mat4 P; uniform mat4 MV; uniform float dt; uniform vec2 vp;
@@ -112,7 +122,7 @@ export function createSats(gl, list, groups, o = {}) {
   const opt = { ctxSize: 0.06, smallSize: 0.032, minPx: 3, maxPx: 40, orbitSeg: 160, rebase: 500,
     models: true, modelSize: 0.22, modelScale: 1, modelMinPx: 14, ...o };   // modelSize — наибольший размер модели в радиусах Земли;
   // modelMinPx — меньше этого (css px) модель на экране не бывает: издалека её всё равно видно
-  const pS = prog(gl, VS, FS), pT = prog(gl, VS_T, FS_T), pL = prog(gl, VS_L, FS_L);
+  const pS = prog(gl, VS, FS), pT = prog(gl, VS_T, FS_T), pL = prog(gl, VS_L, FS_L), pR = prog(gl, VS_R, FS_R);
   const n = list.length;
   const ctx = list.map((s, k) => (s.group === 'context' ? k : -1)).filter((k) => k >= 0);
   // точки: e0, e1 (обновляются при пересчёте), цвет
@@ -147,8 +157,8 @@ export function createSats(gl, list, groups, o = {}) {
   const bO = gl.createBuffer(), seg = opt.orbitSeg, orb = new Float32Array(ctx.length * (seg + 1) * 3);
   // модели известных
   const deriv = !!gl.getExtension('OES_standard_derivatives');
-  const pM = opt.models && ctx.length ? prog(gl, VS_M, FS_M(deriv)) : null;
-  const SIZE = { iss: 1.45, css: 1.25, hubble: 0.9 };                  // станции крупнее, Хаббл мельче
+  const pM = opt.models ? prog(gl, VS_M, FS_M(deriv)) : null;
+  const SIZE = { iss: 1.45, css: 1.25, hubble: 0.9, cube3: 0.4, micro: 0.45 };   // станции крупнее, Хаббл мельче; малые — «под лупой»
   const geo = {};                                                     // kind → { body, wing } на видеокарте
   const up = (m) => { const vb = gl.createBuffer(), ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, m.v, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx, gl.STATIC_DRAW); return { vb, ib, n: m.idx.length }; };
@@ -156,17 +166,20 @@ export function createSats(gl, list, groups, o = {}) {
   const M = pM ? ctx.map((k) => ({ k, kind: modelKind(list[k].key, list[k].name), g: null, scale: 0 })) : [];
   const ready = new Set(); let tris = 0;
   const t0 = performance.now();
+  const scaleOf = (kind) => opt.modelSize * opt.modelScale * (SIZE[kind] || 1) / geo[kind].ext;
   function attach(b) {
     geo[b.kind] = { body: up(b.body), wing: up(b.wing), ext: b.ext, tris: (b.body.idx.length + b.wing.idx.length) / 3 };
-    for (const m of M) if (m.kind === b.kind) { m.g = geo[b.kind]; m.scale = opt.modelSize * opt.modelScale * (SIZE[m.kind] || 1) / m.g.ext; ready.add(m.k); tris += m.g.tris; }
+    for (const m of M) if (m.kind === b.kind) { m.g = geo[b.kind]; m.scale = scaleOf(m.kind); ready.add(m.k); tris += m.g.tris; }
+    if (selM && selM.kind === b.kind && !selM.g) { selM.g = geo[b.kind]; selM.scale = scaleOf(b.kind); }
     tRef = 0;                                                         // пересчитать: точку этого спутника — убрать
-    if (ready.size === M.length && opt.onModels) opt.onModels(tris, performance.now() - t0);
+    if (kinds.every((k) => geo[k]) && opt.onModels) opt.onModels(tris, performance.now() - t0);
   }
-  const kinds = [...new Set(M.map((m) => m.kind))];
+  // модели малых спутников — заранее, чтобы при выборе ничего не строить
+  const kinds = [...new Set(M.map((m) => m.kind))].concat(pM ? ['cube3', 'micro'] : []);
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.19', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.20', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);
@@ -174,6 +187,10 @@ export function createSats(gl, list, groups, o = {}) {
   }
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
+  // выбранный спутник: кольцо, его орбита, у малых — модель вместо точки
+  let sel = -1, selM = null, selOrbitT = -1e18;
+  const bOs = gl.createBuffer(), orbS = new Float32Array((seg + 1) * 3);
+  const isCtx = (k) => list[k].group === 'context';
   // пересчёт элементов на момент t (мс модельного времени)
   // спутники, которые ведутся по SGP4 (у них простой расчёт разошёлся с SGP4): k → satrec
   const sgp = new Map(); let propagate = null;
@@ -181,7 +198,7 @@ export function createSats(gl, list, groups, o = {}) {
     tRef = t; wallRef = wall;
     const date = sgp.size ? new Date(t) : null;
     for (let k = 0; k < n; k++) {
-      const size = list[k].group === 'context' ? (ready.has(k) ? 0 : opt.ctxSize) : opt.smallSize;
+      const size = list[k].group === 'context' ? (ready.has(k) ? 0 : opt.ctxSize) : (k === sel && selM && selM.g ? 0 : opt.smallSize);
       const rec = sgp.get(k);
       if (rec) {
         let pv = null; try { pv = propagate(rec, date); } catch (e) { pv = null; }
@@ -204,14 +221,15 @@ export function createSats(gl, list, groups, o = {}) {
     gl.bindBuffer(gl.ARRAY_BUFFER, bT); gl.bufferSubData(gl.ARRAY_BUFFER, 0, tq);
   }
   // орбиты известных: эллипс в «художественной» шкале (узел и перицентр медленно поворачиваются — перестраиваем)
+  function orbitInto(k, t, out, off) {
+    const s = list[k].el, a = at(s, t);
+    for (let m = 0; m <= seg; m++) {
+      const p = posFrom(s.a, s.e, s.i, a.raan, a.argp, m / seg * 2 * Math.PI), r = Math.hypot(p[0], p[1], p[2]), R = artR(r);
+      out.set([p[0] / r * R, p[1] / r * R, p[2] / r * R], off + m * 3);
+    }
+  }
   function buildOrbits(t) {
-    ctx.forEach((k, j) => {
-      const s = list[k].el, a = at(s, t);
-      for (let m = 0; m <= seg; m++) {
-        const p = posFrom(s.a, s.e, s.i, a.raan, a.argp, m / seg * 2 * Math.PI), r = Math.hypot(p[0], p[1], p[2]), R = artR(r);
-        orb.set([p[0] / r * R, p[1] / r * R, p[2] / r * R], (j * (seg + 1) + m) * 3);
-      }
-    });
+    ctx.forEach((k, j) => orbitInto(k, t, orb, j * (seg + 1) * 3));
     gl.bindBuffer(gl.ARRAY_BUFFER, bO); gl.bufferData(gl.ARRAY_BUFFER, orb, gl.DYNAMIC_DRAW);
   }
 
@@ -237,7 +255,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 48, 0); gl.vertexAttribPointer(an, 3, gl.FLOAT, false, 48, 12);
       gl.vertexAttribPointer(ac, 4, gl.FLOAT, false, 48, 24); gl.vertexAttribPointer(ag, 2, gl.FLOAT, false, 48, 40);
     };
-    for (const m of M) {
+    for (const m of (selM ? M.concat([selM]) : M)) {
       if (!m.g) continue;
       const p = scenePos(m.k, dt), p1 = scenePos(m.k, dt + 1); if (!p || !p1) continue;
       // оси модели: Z — к Земле, X — по полёту (без составляющей вдоль Z), Y = Z × X
@@ -247,7 +265,8 @@ export function createSats(gl, list, groups, o = {}) {
       const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
       // не меньше modelMinPx на экране (F·0,45 — пикселей на радиус Земли на расстоянии 1 листа)
       const zc = MV[2] * p[0] + MV[6] * p[1] + MV[10] * p[2] + MV[14], px = F * 0.45 * m.g.ext * m.scale / Math.max(zc, 1e-3);
-      const s = m.scale * Math.max(1, opt.modelMinPx * dpr / px);
+      const minPx = (m === selM ? 32 : opt.modelMinPx) * dpr;          // выбранный малый — крупнее, чтобы разглядеть
+      const s = m.scale * Math.max(1, minPx / px); m.px = Math.max(px, minPx);
       Mm.set([x[0] * s, x[1] * s, x[2] * s, 0, y[0] * s, y[1] * s, y[2] * s, 0, z[0] * s, z[1] * s, z[2] * s, 0, p[0], p[1], p[2], 1]);
       // тень Земли (цилиндр по направлению от Солнца)
       const along = p[0] * sunE[0] + p[1] * sunE[1] + p[2] * sunE[2];
@@ -281,6 +300,17 @@ export function createSats(gl, list, groups, o = {}) {
       ctx.forEach((k, j) => { const c = colr.subarray(k * 3, k * 3 + 3); gl.uniform4f(gl.getUniformLocation(pL, 'c'), c[0], c[1], c[2], 0.35); gl.drawArrays(gl.LINE_STRIP, j * (seg + 1), seg + 1); });
       gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(ap);
     }
+    // орбита выбранного (поверх своей, ярче)
+    if (sel >= 0) {
+      if (Math.abs(t - selOrbitT) > 3600e3) { orbitInto(sel, t, orbS, 0); gl.bindBuffer(gl.ARRAY_BUFFER, bOs); gl.bufferData(gl.ARRAY_BUFFER, orbS, gl.DYNAMIC_DRAW); selOrbitT = t; }
+      gl.useProgram(pL); setRS(gl, pL, rs);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'MV'), false, MV);
+      const ap = gl.getAttribLocation(pL, 'p');
+      gl.bindBuffer(gl.ARRAY_BUFFER, bOs); gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 0, 0);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      gl.uniform4f(gl.getUniformLocation(pL, 'c'), 1, 1, 1, 0.7); gl.drawArrays(gl.LINE_STRIP, 0, seg + 1);
+      gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(ap);
+    }
     // точки
     gl.useProgram(pS); setRS(gl, pS, rs);
     gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pS, 'MV'), false, MV);
@@ -295,7 +325,24 @@ export function createSats(gl, list, groups, o = {}) {
     gl.bindBuffer(gl.ARRAY_BUFFER, bC); gl.enableVertexAttribArray(ac); gl.vertexAttribPointer(ac, 3, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.POINTS, 0, n);
     gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1); gl.disableVertexAttribArray(ac);
-    if (M.length) drawModels(P, MV, sunE, dt, rs, F, dpr);
+    if (M.length || selM) drawModels(P, MV, sunE, dt, rs, F, dpr);
+    // кольцо выбранного
+    if (sel >= 0 && el[sel * 8] > 0) {
+      gl.useProgram(pR); setRS(gl, pR, rs);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'MV'), false, MV);
+      gl.uniform1f(gl.getUniformLocation(pR, 'dt'), dt);
+      const m = M.find((q) => q.k === sel) || selM;
+      let rpx = 22 * dpr;                                               // радиус кольца — по размеру модели на экране, не меньше 22 css px
+      if (m && m.g && m.px) rpx = Math.max(rpx, m.px * 0.75 + 6 * dpr);
+      const ps = Math.min(2 * rpx, 250 * dpr); gl.uniform1f(gl.getUniformLocation(pR, 'px'), ps); gl.uniform1f(gl.getUniformLocation(pR, 'pf'), ps);
+      const a0 = gl.getAttribLocation(pR, 'e0'), a1 = gl.getAttribLocation(pR, 'e1');
+      gl.bindBuffer(gl.ARRAY_BUFFER, bE);
+      gl.enableVertexAttribArray(a0); gl.vertexAttribPointer(a0, 4, gl.FLOAT, false, 32, 0);
+      gl.enableVertexAttribArray(a1); gl.vertexAttribPointer(a1, 4, gl.FLOAT, false, 32, 16);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      gl.drawArrays(gl.POINTS, sel, 1);
+      gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1);
+    }
     // подписи
     if (L.length) {
       gl.useProgram(pT); setRS(gl, pT, rs);
@@ -314,7 +361,26 @@ export function createSats(gl, list, groups, o = {}) {
       gl.disableVertexAttribArray(b0); gl.disableVertexAttribArray(b1); gl.disableVertexAttribArray(bq);
     }
   }
+  // выбрать спутник k (−1 — снять выбор). У малых — модель «под лупой» вместо точки
+  function select(k) {
+    sel = k >= 0 && k < n ? k : -1; selM = null; selOrbitT = -1e18;
+    if (sel >= 0 && !isCtx(sel) && pM) {
+      const kind = list[sel].cube ? 'cube3' : 'micro';
+      selM = { k: sel, kind, g: geo[kind] || null, scale: geo[kind] ? scaleOf(kind) : 0 };
+    }
+    tRef = 0;
+  }
+  // положения всех спутников в сцене на модельное время t (для выбора нажатием): [x, y, z] или null; r — радиус модели (R)
+  function positions(t) {
+    const dt = (t - tRef) / 1000, out = new Array(n);
+    for (let k = 0; k < n; k++) {
+      const p = scenePos(k, dt); if (!p) { out[k] = null; continue; }
+      const m = M.find((q) => q.k === k) || (selM && selM.k === k ? selM : null);
+      out[k] = { p, r: m && m.g ? m.g.ext * m.scale * 0.6 : 0 };
+    }
+    return out;
+  }
   // перевести спутники (индексы в list) на SGP4: recs — satrec для каждого, prop — satellite.js propagate
   function useSGP(idx, recs, prop) { propagate = prop; idx.forEach((k, j) => sgp.set(k, recs[j])); tRef = 0; }
-  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), get tris() { return tris; } };
+  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), get tris() { return tris; }, select, positions, get selected() { return sel; } };
 }
