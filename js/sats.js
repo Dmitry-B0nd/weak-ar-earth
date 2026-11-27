@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.21';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.21';
-import { buildModel, modelKind } from './models.js?v=0.21';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.22';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.22';
+import { buildModel, modelKind } from './models.js?v=0.22';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -179,7 +179,7 @@ export function createSats(gl, list, groups, o = {}) {
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.21', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.22', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);
@@ -188,7 +188,7 @@ export function createSats(gl, list, groups, o = {}) {
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // выбранный спутник: кольцо, его орбита, у малых — модель вместо точки
-  let sel = -1, selM = null, selOrbitT = -1e18, near = [], warm = 0;
+  let sel = -1, selM = null, selOrbitT = -1e18, warm = 0;
   const bOs = gl.createBuffer(), orbS = new Float32Array((seg + 1) * 3);
   const isCtx = (k) => list[k].group === 'context';
   // пересчёт элементов на момент t (мс модельного времени)
@@ -333,7 +333,7 @@ export function createSats(gl, list, groups, o = {}) {
       for (const kind of ['cube3', 'micro']) { selM = { k: 0, kind, g: geo[kind], scale: scaleOf(kind) }; drawModels(P, MV, sunE, dt, rs, F, dpr); }
       selM = keep;
     } else if (warm === 1) warm = 2;
-    // кольцо выбранного (яркое) и кольца соседей по нажатию (тусклые, маленькие) — чтобы видно было, кто есть кто
+    // кольцо выбранного
     const rings = [];
     if (sel >= 0 && el[sel * 8] > 0) {
       const m = M.find((q) => q.k === sel) || selM;
@@ -341,7 +341,6 @@ export function createSats(gl, list, groups, o = {}) {
       if (m && m.g && m.px) rpx = Math.max(rpx, m.px * 0.75 + 6 * dpr);
       rings.push([sel, Math.min(2 * rpx, 250 * dpr), 1]);
     }
-    for (const k of near) if (k !== sel && el[k * 8] > 0) rings.push([k, 18 * dpr, 0.5]);
     if (warm === 1 && n) rings.push([0, 4, 0]);                         // прогрев: шейдер кольца — до первого нажатия
     if (rings.length) {
       gl.useProgram(pR); setRS(gl, pR, rs);
@@ -378,8 +377,8 @@ export function createSats(gl, list, groups, o = {}) {
     }
   }
   // выбрать спутник k (−1 — снять выбор). У малых — модель «под лупой» вместо точки
-  function select(k, nearby = []) {
-    sel = k >= 0 && k < n ? k : -1; selM = null; selOrbitT = -1e18; near = sel >= 0 ? nearby.slice(0, 6) : [];
+  function select(k) {
+    sel = k >= 0 && k < n ? k : -1; selM = null; selOrbitT = -1e18;
     if (sel >= 0 && !isCtx(sel) && pM) {
       const kind = list[sel].cube ? 'cube3' : 'micro';
       selM = { k: sel, kind, g: geo[kind] || null, scale: geo[kind] ? scaleOf(kind) : 0 };

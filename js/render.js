@@ -129,9 +129,9 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.21';
-import { gmst, sunECI } from './orbit.js?v=0.21';
-import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.21';
+import { createSats } from './sats.js?v=0.22';
+import { gmst, sunECI } from './orbit.js?v=0.22';
+import { RS_GLSL, setRS, rsUniforms } from './rshutter.js?v=0.22';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа

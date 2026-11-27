@@ -79,7 +79,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function select(k) {
     sel = k; more = false; sat = null;
-    if (R.sats) R.sats.select(k, near);
+    if (R.sats) R.sats.select(k);
     clearInterval(timer);
     if (k < 0) { el.classList.remove('on'); document.body.classList.remove('carded'); return; }
     render(); el.classList.add('on'); document.body.classList.add('carded'); el.scrollTop = 0;
@@ -109,7 +109,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
     el.querySelector('.x').onclick = () => select(-1);
     const mb = el.querySelector('.more'); if (mb) mb.onclick = () => { more = !more; render(); live(); };
     el.querySelectorAll('.chips button').forEach((b) => { b.onclick = () => { const k = +b.dataset.k; near = near.filter((q) => q !== k).concat(sel >= 0 ? [sel] : []); select(k); }; });
-    if (near.length) el.querySelector('.chips .note').textContent = 'рядом (тусклые кольца; ещё нажатие туда же — следующий):';
+    if (near.length) el.querySelector('.chips .note').textContent = 'рядом (ещё нажатие туда же — следующий):';
   }
   // живые сведения: SGP4 одного спутника (satellite.js грузится один раз при первом выборе)
   let lib = null;
@@ -117,7 +117,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
     if (sel < 0) return;
     const k = sel, tb = el.querySelector('.live'); if (!tb) return;
     try {
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.21');
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.22');
       if (k !== sel) return;
       const s = list[k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }
