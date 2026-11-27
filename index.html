@@ -3,32 +3,105 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Лаборатория AR</title>
+<title>AR: Земля и спутники</title>
 <link rel="icon" href="data:,">
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; font-family: system-ui, sans-serif; }
+  /* вид — как в основном проекте «Земля со спутниками» (reference/index.html) */
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none;
+    font-family: -apple-system, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
   #gl { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
   #video { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
-  #panel { position: fixed; left: 0; top: 0; right: 0; margin: 0; padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top));
-    font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; color: #eee; background: rgba(0,0,0,.55); white-space: pre-wrap; pointer-events: none; }
-  #panel.off { display: none; }
-  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap;
-    padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
-  button { font-size: 14px; padding: 10px 12px; border: 0; border-radius: 8px; background: rgba(255,255,255,.85); color: #000; }
-  #start { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 20px; padding: 16px 28px; background: #ffd23f; }
+  button { font-family: inherit; cursor: pointer; }
+
+  /* стартовый экран */
+  #overlay { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; padding: 24px; background: #0a1430; color: #eef2fa; text-align: center; }
+  #overlay h1 { margin: 0; font-size: 26px; line-height: 1.2; }
+  #overlay p { max-width: 32ch; line-height: 1.45; margin: 0; opacity: .85; }
+  #overlay .buttons { display: flex; flex-direction: column; gap: 10px; width: min(280px, 100%); }
+  #overlay button { width: 100%; font-size: 18px; padding: 14px 28px; border: 0; border-radius: 12px; background: #ff9628; color: #0a1430; font-weight: 600; }
+  #overlay button.secondary { background: rgba(255,255,255,.12); color: #fff; }
+  #overlay button:disabled { opacity: .6; }
+  #progress { font-size: 14px; opacity: .7; }
+
+  /* AR: плашка состояния, подсказка, легенда, кнопки */
+  #status { position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 12px); z-index: 5;
+    padding: 8px 14px; border-radius: 20px; font-size: 15px; background: rgba(10, 20, 48, .75); color: #fff; display: none; pointer-events: none; white-space: nowrap; }
+  #status.found { background: rgba(30, 140, 70, .85); }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none; flex-direction: column; align-items: center;
+    gap: 12px; padding: 18px 20px; border-radius: 16px; background: rgba(10, 20, 48, .72); color: #fff; text-align: center; font-size: 16px; pointer-events: none; }
+  #hint img { width: 120px; height: 120px; border-radius: 6px; opacity: .9; animation: hintPulse 2s ease-in-out infinite; }
+  @keyframes hintPulse { 50% { transform: scale(.92); opacity: .6; } }
+  #legend { position: fixed; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); z-index: 5; display: none; flex-direction: column; gap: 4px;
+    padding: 8px 10px; border-radius: 10px; background: rgba(10, 20, 48, .7); color: #fff; font-size: 13px; pointer-events: none; }
+  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .pill { position: fixed; right: 10px; z-index: 5; display: none; padding: 10px 14px; border: 0; border-radius: 22px; font-size: 15px; font-weight: 600;
+    background: rgba(10, 20, 48, .8); color: #fff; }
+  #viewBtn { bottom: calc(env(safe-area-inset-bottom, 0px) + 84px); }
+  #freezeBtn { bottom: calc(env(safe-area-inset-bottom, 0px) + 134px); }
+  #freezeBtn.on { background: #4fd1ff; color: #0a1430; }
+  #viewPanel { position: fixed; right: 10px; z-index: 6; display: none; width: min(300px, calc(100vw - 20px)); box-sizing: border-box;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 184px); padding: 12px; border-radius: 14px; background: rgba(10, 20, 48, .94); color: #eef2fa;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 14px; }
+  #viewPanel .row { margin-bottom: 12px; } #viewPanel .row:last-child { margin-bottom: 0; }
+  #viewPanel .lbl { opacity: .7; font-size: 12px; margin-bottom: 6px; }
+  #viewPanel .seg { display: flex; gap: 4px; background: rgba(255,255,255,.08); border-radius: 10px; padding: 3px; }
+  #viewPanel .seg button { flex: 1; padding: 8px 4px; border: 0; border-radius: 8px; background: none; color: #eef2fa; font-size: 14px; }
+  #viewPanel .seg button.on { background: #ff9628; color: #0a1430; font-weight: 600; }
+  #viewPanel .now { width: 100%; padding: 9px; border: 0; border-radius: 10px; background: rgba(255,255,255,.12); color: #fff; font-size: 14px; }
+  /* пока карточка открыта, элементы под ней не просвечивают */
+  body.card-open #legend, body.card-open #viewBtn, body.card-open #freezeBtn, body.card-open #viewPanel { visibility: hidden; }
+
+  /* поворот и «камера не отвечает» */
+  #rotate { position: fixed; inset: 0; z-index: 20; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: #0a1430; color: #eef2fa; font-size: 18px; text-align: center; padding: 24px; }
+  #rotate .phone { width: 46px; height: 78px; border: 4px solid #eef2fa; border-radius: 10px; position: relative; animation: rotPhone 2.2s ease-in-out infinite; }
+  #rotate .phone::after { content: ''; position: absolute; left: 50%; bottom: 5px; width: 10px; height: 3px; margin-left: -5px; border-radius: 2px; background: #eef2fa; }
+  @keyframes rotPhone { 0%, 25% { transform: rotate(-90deg); } 60%, 100% { transform: rotate(0deg); } }
+  @media (orientation: landscape) and (max-height: 600px) { #rotate { display: flex; } }
+  #stall { position: fixed; left: 10px; right: 10px; top: calc(env(safe-area-inset-top, 0px) + 12px); z-index: 8; display: none; max-width: 420px; margin: 0 auto;
+    padding: 12px 14px; border-radius: 14px; align-items: center; gap: 10px; background: rgba(120, 30, 30, .92); color: #fff; font-size: 15px; }
+  #stall button { margin-left: auto; padding: 8px 12px; border: 0; border-radius: 10px; background: #fff; color: #5a1010; font-weight: 600; }
+
+  /* режим разработчика (?dev=1): панель цифр и кнопки записи */
+  #panel { position: fixed; left: 0; top: 0; right: 0; margin: 0; padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top)); z-index: 3;
+    font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace; color: #eee; background: rgba(0,0,0,.55); white-space: pre-wrap; pointer-events: none; display: none; }
+  body.dev #panel { display: block; } body.dev #panel.off { display: none; }
+  body.dev #status { top: auto; bottom: calc(env(safe-area-inset-bottom, 0px) + 230px); }
+  #bar { position: fixed; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 140px); z-index: 5; display: none; flex-direction: column; gap: 6px; }
+  body.dev.running #bar { display: flex; }
+  body.card-open #bar { display: none !important; }
+  #bar button { font-size: 13px; padding: 7px 10px; border: 0; border-radius: 8px; background: rgba(200, 40, 40, .85); color: #fff; font-weight: 600; text-align: left; }
+  #bar button.dim { background: rgba(10, 20, 48, .8); }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <video id="video" playsinline muted></video>
 <pre id="panel"></pre>
-<button id="start">Старт</button>
+<div id="status">Ищу метку…</div>
+<div id="hint"><img src="img/marker-hint.png" alt=""><div>Наведите камеру на метку</div></div>
+<div id="legend"></div>
+<button id="freezeBtn" class="pill">Заморозить</button>
+<button id="viewBtn" class="pill">Вид</button>
+<div id="viewPanel"></div>
 <div id="bar">
   <button id="save">Сохранить запись</button>
-  <button id="clear">Очистить</button>
-  <button id="vid">Видео 10 с</button>
-  <button id="hide">Панель</button>
+  <button id="clear" class="dim">Очистить</button>
+  <button id="vid" class="dim">Видео 10 с</button>
+  <button id="hide" class="dim">Панель</button>
 </div>
-<script type="module" src="js/main.js?v=0.24"></script>
+<div id="rotate"><div class="phone"></div><div>Поверните телефон вертикально</div></div>
+<div id="stall"><span>Камера перестала отвечать</span><button onclick="location.reload()">Перезапустить</button></div>
+<div id="overlay">
+  <h1>Земля и спутники</h1>
+  <p id="msg">Наведите камеру телефона на метку — над ней появится Земля с настоящими спутниками на своих орбитах.</p>
+  <div class="buttons">
+    <button id="startBtn">Включить камеру</button>
+    <button id="btn3d" class="secondary" style="display:none">Смотреть без камеры</button>
+  </div>
+  <div id="progress">Загрузка…</div>
+</div>
+<script type="module" src="js/main.js?v=0.25"></script>
 </body>
 </html>

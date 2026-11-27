@@ -1,5 +1,5 @@
-import { PLACES, PLACE_CATS, ecef } from './places.js?v=0.24';
-import { gmst, sunECI } from './orbit.js?v=0.24';
+import { PLACES, PLACE_CATS, ecef } from './places.js?v=0.25';
+import { gmst, sunECI } from './orbit.js?v=0.25';
 // Выбор спутника или точки на Земле нажатием и карточка снизу (обычный HTML поверх сцены — текст чёткий, видеокарте ничего не стоит).
 // Нажатие ищет спутник по тому кадру, что сейчас на экране (render.pick); живые сведения — SGP4 для одного спутника
 // 3 раза в секунду по времени сцены.
@@ -41,10 +41,9 @@ const CSS = `
 #card .more { background: none; color: #8cf; padding: 4px 0; font-size: 14px; }
 #card .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; } #card .chips button { font-size: 13px; padding: 6px 10px; background: rgba(255,255,255,.14); color: #eee; }
 #card p { margin: 6px 0; } #card a { color: #8cf; }
-body.carded #bar { display: none; }
 `;
 
-export function createCard({ R, canvas, clock, log, rec, speed }) {
+export function createCard({ R, canvas, clock, log, rec, speed: speedOf = () => 1 }) {
   const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
   const el = document.createElement('div'); el.id = 'card'; document.body.appendChild(el);
   // выбранное: { kind: 'sat' | 'place', k } или null; near — соседи по нажатию (такие же объекты)
@@ -86,8 +85,8 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
     if (R.sats) R.sats.select(h && h.kind === 'sat' ? h.k : -1);
     if (R.places) R.places.select(h && h.kind === 'place' ? h.k : -1);
     clearInterval(timer);
-    if (!h) { el.classList.remove('on'); document.body.classList.remove('carded'); return; }
-    render(); el.classList.add('on'); document.body.classList.add('carded'); el.scrollTop = 0;
+    if (!h) { el.classList.remove('on'); document.body.classList.remove('card-open'); return; }
+    render(); el.classList.add('on'); document.body.classList.add('card-open'); el.scrollTop = 0;
     live(); timer = setInterval(live, 333);
     log('выбран:', nameOf(h), near.length ? `(рядом ещё ${near.length})` : '');
   }
@@ -121,7 +120,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
       <div class="sub">${esc(sub)}</div>
       ${desc ? `<p>${esc(desc)}</p>` : ''}
       <table class="live"></table>
-      ${cur.kind === 'sat' ? `<div class="note">сведения — по времени сцены${speed > 1 ? ` (идёт в ${speed} раз быстрее)` : ''}</div>` : ''}
+      ${cur.kind === 'sat' ? `<div class="note">сведения — по времени сцены${speedOf() > 1 ? ` (идёт в ${speedOf()} раз быстрее)` : ''}</div>` : ''}
       ${links.length ? `<div class="chips links"><span class="note" style="align-self:center;width:100%">спутники сцены, связанные с этим местом:</span>${links.map((k) => `<button data-s="${k}">${esc(list[k].name)}</button>`).join('')}</div>` : ''}
       ${details.length || meta.length ? `<button class="more">${more ? 'Свернуть' : 'Подробнее'}</button>` : ''}
       ${more ? details.map((p) => `<p>${esc(p)}</p>`).join('') + (meta.length ? tbl(meta) : '') : ''}
@@ -146,7 +145,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
         tb.innerHTML = rowsHtml([['Сейчас там (по сцене)', `${state}, Солнце ${elev >= 0 ? 'на' : ''} ${Math.abs(Math.round(elev))}° ${elev >= 0 ? 'над горизонтом' : 'под горизонтом'}`]]);
         return;
       }
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.24');
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.25');
       if (h !== cur) return;
       const s = list[h.k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }
@@ -165,5 +164,10 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
       ]);
     } catch (e) { tb.innerHTML = rowsHtml([['Сведения', 'ошибка: ' + esc(e.message)]]); }
   }
-  return { setData, select, get selected() { return cur; } };
+  // после смены «Вида»: если выбранное скрыто — карточку закрыть
+  function checkHidden() {
+    if (!cur) return;
+    if ((cur.kind === 'sat' && R.sats && !R.sats.shown(cur.k)) || (cur.kind === 'place' && R.places && !R.places.visible)) select(null);
+  }
+  return { setData, select, checkHidden, get selected() { return cur; } };
 }

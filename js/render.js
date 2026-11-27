@@ -129,10 +129,10 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.24';
-import { gmst, sunECI } from './orbit.js?v=0.24';
-import { RS_GLSL, setRS, rsUniforms, inv4 } from './rshutter.js?v=0.24';
-import { createPlaces } from './places.js?v=0.24';
+import { createSats } from './sats.js?v=0.25';
+import { gmst, sunECI } from './orbit.js?v=0.25';
+import { RS_GLSL, setRS, rsUniforms, inv4 } from './rshutter.js?v=0.25';
+import { createPlaces } from './places.js?v=0.25';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
@@ -197,11 +197,12 @@ export function createRenderer(canvas, o = {}) {
   // загрузить текстуры Земли (размер дневной — 2048 или 1024). Каждая отдельно: без дневной Земля остаётся простой,
   // без огней или облаков — с картой, но без них; что не загрузилось и почему — в журнал.
   // ver — добавка к адресу (?v=сборка): файлы текстур меняются под тем же именем, а браузер держит их в кэше
-  async function loadEarth(base, size, log = () => {}, ver = '') {
+  async function loadEarth(base, size, log = () => {}, ver = '', onEach = () => {}) {   // onEach — после каждого файла (строка загрузки)
     if (size > tex.maxSize) { log(`текстура ${size} больше предела видеокарты (${tex.maxSize}) — беру 2048`); size = 2048; }
     const mixSize = size >= 2048 ? 1024 : 512;
     const q = ver ? `?v=${ver}` : '';
-    const res = await Promise.allSettled([loadTex(`${base}earth-day-${size}.jpg${q}`), loadTex(`${base}earth-night-${size}.jpg${q}`, true), loadTex(`${base}earth-mix-${mixSize}.jpg${q}`)]);
+    const each = (p) => p.finally(onEach);
+    const res = await Promise.allSettled([each(loadTex(`${base}earth-day-${size}.jpg${q}`)), each(loadTex(`${base}earth-night-${size}.jpg${q}`, true)), each(loadTex(`${base}earth-mix-${mixSize}.jpg${q}`))]);
     const fails = res.filter((r) => r.status === 'rejected').map((r) => r.reason && r.reason.message || String(r.reason));
     fails.forEach((m) => log('текстура не загрузилась —', m));
     if (res[0].status !== 'fulfilled') throw new Error(fails[0] || 'дневная текстура');
@@ -253,7 +254,7 @@ export function createRenderer(canvas, o = {}) {
       const dist = Math.hypot(sx - x, sy - y);
       if (dist <= Math.max(rCss, rm)) out.push({ kind: 'sat', k, d: dist, z: q[2], sx, sy });
     }
-    if (places) places.positions(lastView.spin, lastView.camE).forEach((pp, k) => {
+    if (places && places.visible) places.positions(lastView.spin, lastView.camE).forEach((pp, k) => {
       if (pp.vis < 0.35) return;                                       // у горизонта и за ним — не выбирается
       const q = tr(pp.p, 1); if (q[2] <= 0.01) return;
       const sx = ((P[0] * q[0] + P[8] * q[2]) / q[2] + 1) / 2 * cw / dpr, sy = (1 - (P[5] * q[1] + P[9] * q[2]) / q[2]) / 2 * ch / dpr;

@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.24';
-import { RS_GLSL, setRS, inv4 } from './rshutter.js?v=0.24';
-import { buildModel, modelKind } from './models.js?v=0.24';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.25';
+import { RS_GLSL, setRS, inv4 } from './rshutter.js?v=0.25';
+import { buildModel, modelKind } from './models.js?v=0.25';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -188,7 +188,7 @@ export function createSats(gl, list, groups, o = {}) {
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.24', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.25', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);
@@ -198,6 +198,10 @@ export function createSats(gl, list, groups, o = {}) {
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // выбранный спутник: кольцо, его орбита, у малых — модель вместо точки
   let sel = -1, selM = null, selOrbitT = -1e18, warm = 0, lastCam = [0, 0, 10];
+  // что показывать (панель «Вид»): малые — 'all' | 'cube' | 'none', известные — да/нет
+  const view = { small: 'all', context: true };
+  const shown = (k) => (list[k].group === 'context' ? view.context : view.small === 'all' || (view.small === 'cube' && list[k].cube));
+  function setView(v) { Object.assign(view, v); tRef = 0; }
   const bOs = gl.createBuffer(), orbS = new Float32Array((seg + 1) * 3);
   const isCtx = (k) => list[k].group === 'context';
   // пересчёт элементов на момент t (мс модельного времени)
@@ -207,7 +211,7 @@ export function createSats(gl, list, groups, o = {}) {
     tRef = t; wallRef = wall;
     const date = sgp.size ? new Date(t) : null;
     for (let k = 0; k < n; k++) {
-      const size = list[k].group === 'context' ? (ready.has(k) ? 0 : opt.ctxSize) : (k === sel && selM && selM.g ? 0 : opt.smallSize);
+      const size = !shown(k) ? 0 : list[k].group === 'context' ? (ready.has(k) ? 0 : opt.ctxSize) : (k === sel && selM && selM.g ? 0 : opt.smallSize);
       const rec = sgp.get(k);
       if (rec) {
         let pv = null; try { pv = propagate(rec, date); } catch (e) { pv = null; }
@@ -265,6 +269,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.vertexAttribPointer(ac, 4, gl.FLOAT, false, 48, 24); gl.vertexAttribPointer(ag, 2, gl.FLOAT, false, 48, 40);
     };
     for (const m of (selM ? M.concat([selM]) : M)) {
+      if (!shown(m.k) && warm !== 1) continue;
       if (!m.g) continue;
       const p = scenePos(m.k, dt), p1 = scenePos(m.k, dt + 1); if (!p || !p1) continue;
       // оси модели: Z — к Земле, X — по полёту (без составляющей вдоль Z), Y = Z × X
@@ -302,7 +307,7 @@ export function createSats(gl, list, groups, o = {}) {
     const Mi = inv4(MV), camE = Mi ? [Mi[12] / Mi[15], Mi[13] / Mi[15], Mi[14] / Mi[15]] : [0, 0, 10];   // камера в осях Земли
     lastCam = camE;
     // орбиты
-    if (ctx.length) {
+    if (ctx.length && view.context) {
       gl.useProgram(pL); setRS(gl, pL, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'MV'), false, MV);
       const ap = gl.getAttribLocation(pL, 'p');
@@ -312,7 +317,7 @@ export function createSats(gl, list, groups, o = {}) {
       gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(ap);
     }
     // орбита выбранного (поверх своей, ярче)
-    if (sel >= 0) {
+    if (sel >= 0 && shown(sel)) {
       if (Math.abs(t - selOrbitT) > 3600e3) { orbitInto(sel, t, orbS, 0); gl.bindBuffer(gl.ARRAY_BUFFER, bOs); gl.bufferData(gl.ARRAY_BUFFER, orbS, gl.DYNAMIC_DRAW); selOrbitT = t; }
       gl.useProgram(pL); setRS(gl, pL, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pL, 'MV'), false, MV);
@@ -372,7 +377,7 @@ export function createSats(gl, list, groups, o = {}) {
     }
     if (warm === 1) gl.disable(gl.SCISSOR_TEST);
     // подписи
-    if (L.length) {
+    if (L.length && view.context) {
       gl.useProgram(pT); setRS(gl, pT, rs);
       gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pT, 'MV'), false, MV);
       gl.uniform1f(gl.getUniformLocation(pT, 'dt'), dt); gl.uniform3f(gl.getUniformLocation(pT, 'camE'), ...camE);
@@ -402,7 +407,7 @@ export function createSats(gl, list, groups, o = {}) {
   function positions(t) {
     const dt = (t - tRef) / 1000, out = new Array(n);
     for (let k = 0; k < n; k++) {
-      const p = scenePos(k, dt); if (!p) { out[k] = null; continue; }
+      const p = shown(k) ? scenePos(k, dt) : null; if (!p) { out[k] = null; continue; }
       const m = M.find((q) => q.k === k) || (selM && selM.k === k ? selM : null);
       out[k] = { p, r: m && m.g ? m.g.ext * m.scale * 0.6 : 0 };
     }
@@ -410,5 +415,5 @@ export function createSats(gl, list, groups, o = {}) {
   }
   // перевести спутники (индексы в list) на SGP4: recs — satrec для каждого, prop — satellite.js propagate
   function useSGP(idx, recs, prop) { propagate = prop; idx.forEach((k, j) => sgp.set(k, recs[j])); tRef = 0; }
-  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), get tris() { return tris; }, select, positions, get selected() { return sel; } };
+  return { draw, n, nCtx: ctx.length, opt, useSGP, get nSGP() { return sgp.size; }, models: M.map((m) => m.kind), get tris() { return tris; }, select, positions, get selected() { return sel; }, setView, shown, nSmall: list.filter((q) => q.group !== 'context').length, nCube: list.filter((q) => q.group !== 'context' && q.cube).length };
 }

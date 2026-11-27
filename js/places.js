@@ -1,6 +1,6 @@
 // Точки интереса на Земле: космодромы, управление и связь, прочее. Рисуются значками на поверхности (вращаются вместе
 // с Землёй), у горизонта плавно гаснут; по нажатию — карточка. Тексты — короткие, только проверенные факты.
-import { RS_GLSL, setRS } from './rshutter.js?v=0.24';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.25';
 
 export const PLACE_CATS = {
   launch: { label: 'Космодром', color: '#ff8a3d' },
@@ -152,9 +152,10 @@ export function createPlaces(gl, o = {}) {
   const data = new Float32Array(n * 7);
   PLACES.forEach((q, i) => data.set([...ecef(q.lat, q.lon), ...hex(PLACE_CATS[q.cat].color), i], i * 7));
   const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-  let sel = -1;
+  let sel = -1, visible = true;
   // P, MV (оси Земли без вращения → камера), spin — звёздное время (рад), camE — камера в осях Земли (радиусы)
   function draw(P, MV, spin, camE, dpr, rs, F) {
+    if (!visible) return;
     gl.useProgram(pr); setRS(gl, pr, rs);
     gl.uniformMatrix4fv(gl.getUniformLocation(pr, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pr, 'MV'), false, MV);
     gl.uniform2f(gl.getUniformLocation(pr, 'rot'), Math.cos(spin), Math.sin(spin));
@@ -182,5 +183,5 @@ export function createPlaces(gl, o = {}) {
       return { p: p.map((x) => x * 1.02), vis };
     });
   }
-  return { draw, positions, select(i) { sel = i; }, get selected() { return sel; }, n };
+  return { draw, positions, select(i) { sel = i; }, get selected() { return sel; }, n, get visible() { return visible; }, set visible(v) { visible = !!v; } };
 }

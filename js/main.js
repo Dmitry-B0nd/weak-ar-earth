@@ -1,9 +1,11 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.24';
-import { createRenderer } from './render.js?v=0.24';
-import { createPoseTrack } from './pose.js?v=0.24';
-import { createCard } from './card.js?v=0.24';
+import { BUILD } from './build.js?v=0.25';
+import { createRenderer } from './render.js?v=0.25';
+import { createPoseTrack } from './pose.js?v=0.25';
+import { createCard } from './card.js?v=0.25';
+import { createUI } from './ui.js?v=0.25';
+import { PLACE_CATS } from './places.js?v=0.25';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -33,8 +35,9 @@ const TEX = Q.get('tex') === null ? (navigator.deviceMemory === undefined || nav
 // лаборатории (data/satellites.json), иначе с сайта основного проекта (тот же домен). ?satdata=адрес — свой файл;
 // ?sats=N — условный нагрузочный набор из N точек; ?sats=0 — без спутников. ?speed=120 — ускорение времени.
 const SATQ = Q.get('sats'), SATS = SATQ === null ? -1 : Math.max(0, +SATQ || 0);
-const SPEED = +Q.get('speed') || 120;
+let SPEED = 120;                                          // ускорение времени: из панели «Вид» (запоминается), ?speed=N — задать
 const CLK = { t0: Date.now(), w0: performance.now() };
+function setSpeed(v) { const t = clock().t; CLK.t0 = t; CLK.w0 = performance.now(); SPEED = v; }   // без скачка времени
 const clock = () => ({ t: CLK.t0 + (performance.now() - CLK.w0) * SPEED, speed: SPEED });
 const SATINFO = { text: SATS === 0 ? 'нет' : 'грузятся…' };
 // Сверка с настоящим SGP4 (satellite.js) на этих данных: где окажется каждый спутник по расчёту лаборатории и по SGP4,
@@ -69,19 +72,21 @@ const SOPT = { models: Q.get('models') !== '0', modelScale: +Q.get('msize') || 1
 async function loadSats() {
   const { fromOMM } = await import(`./orbit.js?v=${BUILD}`);
   const { syntheticList } = await import(`./sats.js?v=${BUILD}`);
-  if (SATS > 0) { R.setSats(syntheticList(SATS, Date.now()), { cubesat: { color: '#7dff8a' } }); SATINFO.text = `${SATS} условных`; return; }
+  if (SATS > 0) { R.setSats(syntheticList(SATS, Date.now()), { cubesat: { color: '#7dff8a' } }); SATINFO.text = `${SATS} условных`; UI.loaded(); UI.loaded(); afterSats({}); return; }
   const urls = Q.get('satdata') ? [Q.get('satdata')] : ['data/satellites.json', '../ar-earth/data/satellites.json'];
   for (const u of urls) {
     try {
       const r = await fetch(u, { cache: 'no-cache' }); if (!r.ok) continue;
-      const d = await r.json(), list = [];
+      const d = await r.json(), list = []; UI.loaded();
       for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm, info: s }); } catch (e) { /* пропуск */ } }
       const tS = performance.now(); const sat = R.setSats(list, d.groups || {}, SOPT);
       log('спутники подготовлены за', (performance.now() - tS).toFixed(0), 'мс');
       // тексты для карточек малых спутников — рядом с данными (satellites-extra.json основного проекта)
       let extra = null;
       try { const re = await fetch(new URL('satellites-extra.json', new URL(u, location.href)), { cache: 'no-cache' }); if (re.ok) extra = await re.json(); } catch (e) { /* нет — запасные тексты */ }
+      UI.loaded();
       if (CARD) CARD.setData(list, extra);
+      afterSats(d.groups || {});
       log('карточки:', extra ? 'тексты из satellites-extra.json' : 'satellites-extra.json не найден — короткие тексты');
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
       SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
@@ -91,6 +96,7 @@ async function loadSats() {
     } catch (e) { log('спутники: не взял', u, e.message); }
   }
   R.setSats(syntheticList(600, Date.now()), { cubesat: { color: '#7dff8a' } });
+  UI.loaded(); UI.loaded(); afterSats({});
   SATINFO.text = 'данных нет — 600 условных';
   log('спутники: данные не найдены, условный набор 600');
 }
@@ -211,6 +217,8 @@ function startBitmap() {
 }
 
 function newFrame(tf, ta, src, w, h) {
+  lastCamAt = performance.now();
+  if (UI.frozen || paused) { lastTf = 0; return; }        // заморожено или экран повёрнут: кадры не показываем и не разбираем
   if (tf <= lastTf) tf = lastTf + 0.1;
   if (lastTf) { const d = tf - lastTf; camDtAvg += (Math.min(d, 300) - camDtAvg) * 0.1; S.camDt.push(d); if (S.camDt.length > 60) S.camDt.shift(); }
   lastTf = tf;
@@ -266,10 +274,17 @@ function onResult(m) {
 // Кадр показывается с постоянной задержкой D — столько, сколько обычно ждать его позы (поза кадра есть, когда
 // пришёл результат зрения по нему или по более позднему кадру). Так видео идёт ровно, без пропусков кадров,
 // а сцена приклеена к картинке. D подстраивается по последним кадрам и не больше MAXDELAY.
-let shown = null, visible = false, D = 60;
+let shown = null, visible = false, D = 60, lastPose = null, lastCamAt = 0, paused = false;
 function loop(now) {
   requestAnimationFrame(loop);
   S.raf++;
+  // камера не присылает кадров дольше 6 с (не заморожено, экран вертикально) — «Камера перестала отвечать»
+  UI.setStall(lastCamAt > 0 && !paused && now - lastCamAt > 6000);
+  UI.tick(now, visible || UI.frozen, camReady && !paused && !document.body.classList.contains('card-open'));
+  if (UI.frozen) {                                               // заморожено: тот же кадр и та же поза, время сцены идёт
+    if (shown && lastPose) { const td = performance.now(); R.draw(shown, lastPose, f0, false); S.drawMs += performance.now() - td; S.draws++; S.shown++; }
+    return;
+  }
   // кадр готов к показу, когда для него есть поза или зрение уже ответило по более позднему кадру (тогда своей позы
   // у него не будет: ждать её до MAXDELAY незачем — при потере листа это давало паузы показа до 134 мс)
   for (const r of R.ring) if (r.n >= 0 && !r.cov && (T.covered(r.tf) || lastAnsTf > r.tf + 0.5)) {
@@ -297,6 +312,7 @@ function loop(now) {
   visible = !!pose;
   if (pose) S.shown++; else S.hidden++;
   S.delay += now - pick.ta; S.draws++;
+  lastPose = camReady ? pose : null;
   const td = performance.now();
   R.draw(pick, camReady ? pose : null, f0, !camReady);
   S.drawMs += performance.now() - td;
@@ -323,7 +339,7 @@ function panelTick() {
     `метки ${m.tags || 0}/${tr.vis || 0} · лист ${sheetPx.toFixed(0)} px, клетка ${(m.cellPx || 0).toFixed(1)} px · края ${tr.used || 0}/${tr.edges || 0}, ошибка ${(m.err || 0).toFixed(2)} px` +
     ` · затвор ${RSQ === '0' ? 'без поправки' : RSI.k ? `${RSI.k[0].toFixed(0)}/${RSI.k[1].toFixed(0)} мс` + (VOPT.rs && VOPT.rs.fixed ? ' (задано)' : ` (учтено ${RSI.k[3]}, вес ${RSI.k[2].toFixed(2)})`) : '…'}\n` +
     `показ ${(draws / dt).toFixed(1)} к/с (rAF ${(d('raf') / dt).toFixed(0)}, рисование ${(d('drawMs') / draws).toFixed(1)} мс), задержка ${(d('delay') / draws).toFixed(0)} мс, сцена ${(100 * d('shown') / draws).toFixed(0)}%, пауза max ${S.maxGap.toFixed(0)} мс\n` +
-    `расстояние ${dist.toFixed(1)} листа · Земля ${TEX ? (R.tex.day ? R.tex.info : 'грузится…') : 'простая'} · спутники ${SATINFO.text}, время ×${SPEED}${SATINFO.check ? '\n' + SATINFO.check : ''} · запись ${REC.det.length} · ошибок ${S.errs}` + (m.why ? `\n${m.why}` : '');
+    `расстояние ${dist.toFixed(1)} листа · Земля ${TEX ? (R.tex.day ? R.tex.info : 'грузится…') : 'простая'} · спутники ${SATINFO.text}, время ×${SPEED}${UI.frozen ? ' · ЗАМОРОЖЕНО' : ''}${SATINFO.check ? '\n' + SATINFO.check : ''} · запись ${REC.det.length} · ошибок ${S.errs}` + (m.why ? `\n${m.why}` : '');
   Object.assign(P0, S); S.maxGap = 0;
 }
 
@@ -366,34 +382,90 @@ async function recordVideo(btn) {
 }
 
 // ---------- запуск ----------
+// Сцена, спутники и текстуры грузятся сразу при открытии страницы (строка «Загружено N из M»), камера — по кнопке.
+const DEV = Q.get('dev') === '1';
+if (DEV) document.body.classList.add('dev');
+const UI = createUI({ onView });
+if (Q.get('speed')) UI.view.speed = +Q.get('speed');
+SPEED = UI.view.speed;
+function applyView() {
+  if (R.sats && R.sats.setView) R.sats.setView({ small: UI.view.small, context: UI.view.context });
+  if (R.places) R.places.visible = UI.view.poi;
+  if (CARD) CARD.checkHidden();
+}
+function onView(v, key) {
+  if (key === 'speed') { setSpeed(v.speed); log('скорость времени ×' + v.speed); }
+  else if (key === 'now') { CLK.t0 = Date.now(); CLK.w0 = performance.now(); log('время сцены — текущее'); }
+  else { applyView(); log('вид:', JSON.stringify(v)); }
+}
+function afterSats(groups) {
+  applyView();
+  if (R.sats) UI.setCounts({ small: R.sats.nSmall || 0, cube: R.sats.nCube || 0 });
+  UI.setLegend([...(R.places ? Object.values(PLACE_CATS).map((c) => [c.label, c.color]) : []), ...Object.values(groups).filter((g) => g.label).map((g) => [g.label, g.color])]);
+}
+UI.canFreeze = () => visible;
+UI.onFreeze = (on) => {
+  log(on ? 'заморожено' : 'продолжаю');
+  if (!on) { T.reset(); roiNext = null; busy = false; }          // после паузы поза набирается заново, а не тянется со старой
+};
+function onOrient() {
+  const land = matchMedia('(orientation: landscape) and (max-height: 600px)').matches;
+  if (land === paused) return;
+  paused = land; log(land ? 'экран горизонтально — пауза' : 'экран вертикально — продолжаю');
+  if (!land) { T.reset(); roiNext = null; busy = false; }
+}
+addEventListener('resize', () => setTimeout(onOrient, 250));
+
+let texErr = null;
+function prepare() {
+  R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, places: Q.get('places') !== '0', ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
+  CARD = createCard({ R, canvas, clock, log, rec: REC.sel, speed: () => SPEED });
+  window.LAB = { R, CARD, UI };                                                            // для проверок из консоли
+  log('точки на Земле:', R.places ? R.places.n : 'выключены');
+  UI.setLegend(R.places ? Object.values(PLACE_CATS).map((c) => [c.label, c.color]) : []);
+  if (TEX) {
+    UI.expect(3);
+    R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, TEXV, () => UI.loaded()).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
+      .catch((e) => {
+        S.errs++; texErr = e; log('текстуры не загрузились:', e.message || e);
+        UI.showError('Не найдены текстуры Земли.<br>Папка <b>tex</b> должна лежать рядом с index.html.');
+      });
+  }
+  if (SATS !== 0) { UI.expect(2); loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); }); }
+}
+
 async function start() {
-  $('start').style.display = 'none';
+  UI.starting();
   try {
-    R = createRenderer(canvas, { maxDpr: +Q.get('dpr') || 2, halo: Q.get('halo') !== '0', frame: Q.get('frame') !== '0', clock, places: Q.get('places') !== '0', ...(Q.get('lights') ? { lights: +Q.get('lights') } : {}) });
-    CARD = createCard({ R, canvas, clock, log, rec: REC.sel, speed: SPEED });
-    window.LAB = { R, CARD };
-    log('точки на Земле:', R.places ? R.places.n : 'выключены');                              // для проверок из консоли
-    if (SATS !== 0) loadSats().catch((e) => { S.errs++; log('спутники:', e.message || e); });
-    if (TEX) R.loadEarth(`tex/`, TEX >= 4096 ? 4096 : TEX >= 2048 ? 2048 : 1024, log, TEXV).then(() => log('текстуры Земли', R.tex.info, `(${R.tex.kb} КБ) за`, R.tex.ms.toFixed(0), 'мс, передача в видеокарту (самая долгая)', R.tex.up.toFixed(0), 'мс; предел', R.tex.maxSize, R.tex.hp ? 'highp есть' : 'highp НЕТ'))
-      .catch((e) => { S.errs++; log('текстуры не загрузились:', e.message || e); });
     worker = new Worker(`js/worker.js?v=${BUILD}`, { type: 'module' });
     worker.onmessage = (e) => onResult(e.data);
     worker.onerror = (e) => { S.errs++; log('ошибка потока:', e.message || e); };
-    await openCamera();
+    try { await openCamera(); } catch (e) { e.cam = true; throw e; }
     if (CAP === 'vf' && !('MediaStreamTrackProcessor' in window)) { log('MediaStreamTrackProcessor нет — беру картинку'); CAP = 'bitmap'; }
     if (CAP === 'vf') { readFrames().catch((e) => { S.errs++; log('чтение кадров:', e.message); }); }
     else startBitmap();
+    UI.started(); onOrient();
+    log('камера включена');
     requestAnimationFrame(loop);
     setInterval(panelTick, 1000);
     try { await navigator.wakeLock?.request('screen'); } catch (e) { /* не страшно */ }
   } catch (e) {
+    S.errs++; log('ошибка запуска:', e.name || '', e.message || e);
+    if (worker) { worker.terminate(); worker = null; }
+    const denied = e.cam && (e.name === 'NotAllowedError' || e.name === 'SecurityError' || e.name === 'NotFoundError' || e.name === 'OverconstrainedError' || !navigator.mediaDevices);
+    UI.showError(denied || (e.cam && e.name === 'TypeError')
+      ? `Нет доступа к камере.<br>Разрешите доступ (${/iPhone|iPad|iPod/.test(navigator.userAgent) ? '«Настройки → Safari → Камера»' : 'значок слева от адреса сайта → «Камера»'}) и нажмите «Попробовать снова».`
+      : `Что-то пошло не так.<br><small>${String(e.message || e).replace(/[<&]/g, '')}</small>`);
     panel.textContent = `сборка ${BUILD}\nОшибка запуска: ${e.message}\n` + LOGS.join('\n');
-    $('start').style.display = '';
   }
 }
-$('start').onclick = start;
+UI.startBtn.onclick = start;
 $('save').onclick = saveRecord;
 $('clear').onclick = clearRecord;
 $('vid').onclick = () => recordVideo($('vid'));
 $('hide').onclick = () => { panel.classList.toggle('off'); };
-panel.textContent = `сборка ${BUILD}\nНажмите «Старт» и наведите камеру на лист с метками.`;
+panel.textContent = `сборка ${BUILD}\nНажмите «Включить камеру» и наведите камеру на лист с метками.`;
+try { prepare(); } catch (e) {
+  S.errs++; log('подготовка:', e.message || e);
+  UI.showError(`Что-то пошло не так.<br><small>${String(e.message || e).replace(/[<&]/g, '')}</small>`);
+}
