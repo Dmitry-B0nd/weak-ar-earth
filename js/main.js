@@ -1,10 +1,10 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.26';
-import { createRenderer } from './render.js?v=0.26';
-import { createPoseTrack } from './pose.js?v=0.26';
-import { createCard } from './card.js?v=0.26';
-import { createUI } from './ui.js?v=0.26';
+import { BUILD } from './build.js?v=0.27';
+import { createRenderer } from './render.js?v=0.27';
+import { createPoseTrack } from './pose.js?v=0.27';
+import { createCard } from './card.js?v=0.27';
+import { createUI } from './ui.js?v=0.27';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -159,7 +159,7 @@ function rsOpt(w, h) {
   if (RSQ === '0') return { off: true };
   if (RSQ && RSQ !== 'reset' && RSQ !== 'auto') { const v = RSQ.split(',').map(Number); return { fixed: [v[0] || 0, v[1] || 0] }; }
   const dev = (track && track.getSettings && track.getSettings().deviceId) || '';
-  RSI.key = `lab-rs:${dev.slice(0, 16)}:${w}x${h}:${EXP}`; RSI.init = null;
+  RSI.key = `lab-rs2:${dev.slice(0, 16)}:${w}x${h}:${EXP}`; RSI.init = null;
   try { if (RSQ === 'reset') localStorage.removeItem(RSI.key); else RSI.init = JSON.parse(localStorage.getItem(RSI.key) || 'null'); } catch (e) { }
   if (RSI.init) log('затвор: из памяти', RSI.init.k.map((v) => v.toFixed(0)).join(', '), 'мс, вес', RSI.init.ev.toFixed(2));
   return { init: RSI.init };

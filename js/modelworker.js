@@ -1,5 +1,5 @@
 // Фоновый поток: строит модели известных спутников (на слабом телефоне это 100–200 мс — главный поток не ждёт).
-import { buildModel } from './models.js?v=0.26';
+import { buildModel } from './models.js?v=0.27';
 onmessage = (e) => {
   for (const kind of e.data) {
     const b = buildModel(kind);

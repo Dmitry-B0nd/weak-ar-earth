@@ -8,7 +8,8 @@
 // kx, ky (время считывания всего кадра со знаком направления) у каждой камеры свои, поэтому они оцениваются
 // по ходу работы: в движении сравнивается «горб» формы листа (насколько кадр выбился из прямой между соседями)
 // с перекосом, который дал бы затвор, — регрессия по накопленным данным. Пока данных мало, k тянется к нулю.
-import { applyH, fitH } from './geom.js?v=0.26';
+// Применяется не вся оценка, а её доля (gain), и при тряске оценка не учится (maxAcc) — см. opt.
+import { applyH, fitH } from './geom.js?v=0.27';
 
 const GRID = []; for (let a = 0; a <= 4; a++) for (let b = 0; b <= 4; b++) GRID.push([a / 4, b / 4]);
 
@@ -27,6 +28,11 @@ export function createRollingShutter(o = {}) {
     learnGap: 110,   // мс: учёт — только если соседи по обе стороны вместе не дальше этого
     minTags: 6,      // учёт — только по уверенным кадрам
     clipPx: 6,       // px: «горб» больше этого — не затвор, а сбой, обрезаем
+    maxAcc: 1,       // px: если лист целиком за кадр выбился из прямой больше этого (тряска, резкий разворот) — не учим:
+                     // там «горб» в основном от ускорения, и оценка уходила к пределу (−40 мс при тряске на месте, 0.26)
+    gain: 0.6,       // доля оценённого времени считывания, которая применяется: скорость для поправки берётся только по
+                     // прошлому кадру (запаздывает на полкадра и шумит), и полная поправка перебарщивает. По 11 записям
+                     // «дурного» (0.17–0.26) 0,6 даёт ту же плавность, что лучшее постоянное значение (−20 мс)
     ...o,
   };
   let W = 480, H = 640;
@@ -34,11 +40,11 @@ export function createRollingShutter(o = {}) {
   const A = { a11: 0, a12: 0, a22: 0, b1: 0, b2: 0, n: 0 };
   let k = opt.fixed ? opt.fixed.slice() : [0, 0];
   if (!opt.fixed && opt.init && opt.init.k && opt.init.ev > 0) {     // прошлое знание — как ev «наблюдений» с этим k
-    const e = Math.min(opt.init.ev, 1); A.a11 = A.a22 = e; A.b1 = opt.init.k[0] * e; A.b2 = opt.init.k[1] * e; solveK();
+    const e = Math.min(opt.init.ev, 1); A.a11 = A.a22 = e; A.b1 = opt.init.k[0] / opt.gain * e; A.b2 = opt.init.k[1] / opt.gain * e; solveK();
   }
   function solveK() {
     const l = opt.ridge, a11 = A.a11 + l, a22 = A.a22 + l, det = a11 * a22 - A.a12 * A.a12;
-    if (det > 0) k = [(A.b1 * a22 - A.b2 * A.a12) / det, (a11 * A.b2 - A.a12 * A.b1) / det].map((v) => Math.max(-opt.maxK, Math.min(opt.maxK, v)));
+    if (det > 0) k = [(A.b1 * a22 - A.b2 * A.a12) / det, (a11 * A.b2 - A.a12 * A.b1) / det].map((v) => Math.max(-opt.maxK, Math.min(opt.maxK, v * opt.gain)));
   }
 
   function setCamera(w, h) { W = w; H = h; hist.length = 0; }
@@ -69,6 +75,7 @@ export function createRollingShutter(o = {}) {
     // сдвиг целиком — настоящее ускорение, не затвор: убираем средние
     const n = R.length, mr = [0, 0], mb = [0, 0, 0, 0];
     for (let j = 0; j < n; j++) { mr[0] += R[j][0] / n; mr[1] += R[j][1] / n; for (let m = 0; m < 4; m++) mb[m] += B[j][m] / n; }
+    if (Math.hypot(mr[0], mr[1]) > opt.maxAcc) return;
     A.a11 *= opt.decay; A.a12 *= opt.decay; A.a22 *= opt.decay; A.b1 *= opt.decay; A.b2 *= opt.decay;
     for (let j = 0; j < n; j++) for (let q = 0; q < 2; q++) {
       const r = Math.max(-opt.clipPx, Math.min(opt.clipPx, R[j][q] - mr[q])), x = B[j][q] - mb[q], y = B[j][2 + q] - mb[2 + q];

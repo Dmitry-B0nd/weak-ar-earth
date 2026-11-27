@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.26';
-import { RS_GLSL, setRS, inv4 } from './rshutter.js?v=0.26';
-import { buildModel, modelKind } from './models.js?v=0.26';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.27';
+import { RS_GLSL, setRS, inv4 } from './rshutter.js?v=0.27';
+import { buildModel, modelKind } from './models.js?v=0.27';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -188,7 +188,7 @@ export function createSats(gl, list, groups, o = {}) {
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.26', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.27', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);

@@ -1,5 +1,5 @@
-import { ecef } from './places.js?v=0.26';
-import { gmst, sunECI } from './orbit.js?v=0.26';
+import { ecef } from './places.js?v=0.27';
+import { gmst, sunECI } from './orbit.js?v=0.27';
 // Выбор спутника или точки на Земле нажатием и карточка снизу (обычный HTML поверх сцены — текст чёткий, видеокарте ничего не стоит).
 // Нажатие ищет спутник по тому кадру, что сейчас на экране (render.pick); живые сведения — SGP4 для одного спутника
 // 3 раза в секунду по времени сцены.
@@ -146,7 +146,7 @@ export function createCard({ R, canvas, clock, log, rec, speed: speedOf = () => 
         tb.innerHTML = rowsHtml([['Сейчас там (по сцене)', `${state}, Солнце ${elev >= 0 ? 'на' : ''} ${Math.abs(Math.round(elev))}° ${elev >= 0 ? 'над горизонтом' : 'под горизонтом'}`]]);
         return;
       }
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.26');
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.27');
       if (h !== cur) return;
       const s = list[h.k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }

@@ -1,6 +1,6 @@
 // Поза листа: (1) оценка по одному распознаванию — в фоновом потоке; (2) сглаживание поворота и показ
 // кадров между распознаваниями — в главном потоке. Без датчиков, без прогнозов, без переключения режимов.
-import { poseFromH, flipPose, refinePose, quatFromR, rFromQuat, slerp, quatAngle, angleBetween, project } from './geom.js?v=0.26';
+import { poseFromH, flipPose, refinePose, quatFromR, rFromQuat, slerp, quatAngle, angleBetween, project } from './geom.js?v=0.27';
 
 // ---------- (1) оценка позы по распознаванию ----------
 export function createPoseEstimator(o = {}) {
