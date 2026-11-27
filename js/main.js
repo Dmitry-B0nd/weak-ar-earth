@@ -1,9 +1,9 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.23';
-import { createRenderer } from './render.js?v=0.23';
-import { createPoseTrack } from './pose.js?v=0.23';
-import { createCard } from './card.js?v=0.23';
+import { BUILD } from './build.js?v=0.24';
+import { createRenderer } from './render.js?v=0.24';
+import { createPoseTrack } from './pose.js?v=0.24';
+import { createCard } from './card.js?v=0.24';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).

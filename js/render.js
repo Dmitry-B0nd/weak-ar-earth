@@ -129,10 +129,10 @@ function frameMesh(w) {
 const mul4 = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
 const norm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
 
-import { createSats } from './sats.js?v=0.23';
-import { gmst, sunECI } from './orbit.js?v=0.23';
-import { RS_GLSL, setRS, rsUniforms, inv4 } from './rshutter.js?v=0.23';
-import { createPlaces } from './places.js?v=0.23';
+import { createSats } from './sats.js?v=0.24';
+import { gmst, sunECI } from './orbit.js?v=0.24';
+import { RS_GLSL, setRS, rsUniforms, inv4 } from './rshutter.js?v=0.24';
+import { createPlaces } from './places.js?v=0.24';
 
 export function createRenderer(canvas, o = {}) {
   const opt = { sun: [-0.6, -0.5, -0.65], tilt: 23.4, dayLen: 60, cloudLen: 400, halo: true, frame: true, clock: null, lights: 1.3, ...o };   // солнце — в осях листа
@@ -316,7 +316,7 @@ export function createRenderer(canvas, o = {}) {
     const sunB0 = sunE ? [0, 1, 2].map((i) => EX[i] * sunE[0] + EY[i] * sunE[1] + EZ[i] * sunE[2]) : norm3(opt.sun);
     const MVe = mul4(M, E0), Mi = inv4(MVe), camE = Mi ? [Mi[12] / Mi[15], Mi[13] / Mi[15], Mi[14] / Mi[15]] : [0, 0, 10];
     const drawSats = () => {
-      if (places) places.draw(P, MVe, spinNow, camE, dpr, rs);       // точки на Земле — после Земли, до спутников
+      if (places) places.draw(P, MVe, spinNow, camE, dpr, rs, s * f);       // точки на Земле — после Земли, до спутников
       lastView = { P, MV: MVe, cw, ch, dpr, F: s * f, t: ck ? ck.t : 0, spin: spinNow, camE };   // для выбора нажатием — то, что показано
       if (!sats || !ck) return;
       sats.draw(ck.t, wall, ck.speed, P, MVe, sunE, s * f, [cw, ch], dpr, rs);
