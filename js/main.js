@@ -1,9 +1,9 @@
 // Лаборатория браузерного AR для слабых телефонов: главный поток.
 // Камера → кадр в текстуру (для показа) и в фоновый поток (для зрения) → поза → показ кадра, для которого поза уже есть.
-import { BUILD } from './build.js?v=0.20';
-import { createRenderer } from './render.js?v=0.20';
-import { createPoseTrack } from './pose.js?v=0.20';
-import { createCard } from './card.js?v=0.20';
+import { BUILD } from './build.js?v=0.21';
+import { createRenderer } from './render.js?v=0.21';
+import { createPoseTrack } from './pose.js?v=0.21';
+import { createCard } from './card.js?v=0.21';
 
 const Q = new URLSearchParams(location.search);
 // как отдавать кадр в поток: кадром камеры (MediaStreamTrackProcessor — Chrome на Android) или картинкой (остальные).
@@ -77,12 +77,12 @@ async function loadSats() {
       const d = await r.json(), list = [];
       for (const s of d.sats || []) { try { const el = fromOMM(s.omm); if (Number.isFinite(el.a) && el.e < 0.95) list.push({ name: s.name, key: s.key, group: s.group, cube: !!s.cube, el, omm: s.omm, info: s }); } catch (e) { /* пропуск */ } }
       const tS = performance.now(); const sat = R.setSats(list, d.groups || {}, SOPT);
+      log('спутники подготовлены за', (performance.now() - tS).toFixed(0), 'мс');
       // тексты для карточек малых спутников — рядом с данными (satellites-extra.json основного проекта)
       let extra = null;
       try { const re = await fetch(new URL('satellites-extra.json', new URL(u, location.href)), { cache: 'no-cache' }); if (re.ok) extra = await re.json(); } catch (e) { /* нет — запасные тексты */ }
       if (CARD) CARD.setData(list, extra);
       log('карточки:', extra ? 'тексты из satellites-extra.json' : 'satellites-extra.json не найден — короткие тексты');
-      log('спутники подготовлены за', (performance.now() - tS).toFixed(0), 'мс');
       const age = d.generated ? Math.round((Date.now() - Date.parse(d.generated)) / 86400000) : '?';
       SATINFO.text = `${list.length} (известных ${sat.nCtx}${sat.models.length ? `, моделей ${sat.models.length}` : ''}), данные ${String(d.generated || '').slice(0, 10)} (${age} сут)`;
       log('спутники:', u, list.length, 'шт., данные', d.generated);

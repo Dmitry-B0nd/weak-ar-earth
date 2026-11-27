@@ -47,7 +47,12 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
   const el = document.createElement('div'); el.id = 'card'; document.body.appendChild(el);
   let list = [], extra = SMALL, sel = -1, more = false, sat = null, timer = 0, near = [];
 
-  function setData(l, ex) { list = l; if (ex && ex.smallSat) extra = ex.smallSat; }
+  function setData(l, ex) {
+    list = l; if (ex && ex.smallSat) extra = ex.smallSat;
+    // прогрев: карточка собирается один раз невидимой (вёрстка, шрифты), SGP4 считается один раз — первое нажатие без фриза
+    const k = list.findIndex((q) => q.group !== 'context');
+    if (k >= 0) setTimeout(() => { if (sel >= 0) return; sel = k; render(); live().then(() => { if (sel === k) { sel = -1; sat = null; el.innerHTML = ''; } }); }, 1500);
+  }
 
   // --- нажатие ---
   let down = null;
@@ -59,15 +64,22 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
     const t0 = performance.now(), hits = R.pick(x, y, 36), ms = performance.now() - t0;
     if (rec) rec.push([Math.round(t0), Math.round(x), Math.round(y), hits.length ? hits[0].k : -1, hits.length ? +hits[0].d.toFixed(1) : -1, hits.length, +ms.toFixed(2)]);
     if (!hits.length) { select(-1); return; }
-    near = hits.slice(1, 5).filter((h) => h.d < hits[0].d + 30).map((h) => h.k);
-    select(hits[0].k);
+    // известные — первыми, если палец рядом с ними (их и ищут чаще); повторное нажатие в то же место — следующий
+    const ctx = hits.filter((h) => list[h.k] && list[h.k].group === 'context' && h.d < 28);
+    let order = ctx.concat(hits.filter((h) => !ctx.includes(h))).map((h) => h.k);
+    const again = last && Math.hypot(x - last.x, y - last.y) < 24 && performance.now() - last.t < 8000 && order.includes(sel);
+    if (again) { const i = order.indexOf(sel); order = order.slice(i + 1).concat(order.slice(0, i + 1)); }
+    last = { x, y, t: performance.now() };
+    near = order.slice(1, 5);
+    select(order[0]);
   });
+  let last = null;
 
   // --- карточка ---
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function select(k) {
     sel = k; more = false; sat = null;
-    if (R.sats) R.sats.select(k);
+    if (R.sats) R.sats.select(k, near);
     clearInterval(timer);
     if (k < 0) { el.classList.remove('on'); document.body.classList.remove('carded'); return; }
     render(); el.classList.add('on'); document.body.classList.add('carded'); el.scrollTop = 0;
@@ -93,10 +105,11 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
       <div class="note">сведения — по времени сцены${speed > 1 ? ` (идёт в ${speed} раз быстрее)` : ''}</div>
       ${details.length || meta.length ? `<button class="more">${more ? 'Свернуть' : 'Подробнее'}</button>` : ''}
       ${more ? details.map((p) => `<p>${esc(p)}</p>`).join('') + (meta.length ? `<table>${meta.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('')}</table>` : '') : ''}
-      ${near.length ? `<div class="chips"><span class="note" style="align-self:center">рядом:</span>${near.map((k) => `<button data-k="${k}">${esc(list[k] ? list[k].name : k)}</button>`).join('')}</div>` : ''}`;
+      ${near.length ? `<div class="chips"><span class="note" style="align-self:center;width:100%">рядом:</span>${near.map((k) => `<button data-k="${k}">${esc(list[k] ? list[k].name : k)}</button>`).join('')}</div>` : ''}`;
     el.querySelector('.x').onclick = () => select(-1);
     const mb = el.querySelector('.more'); if (mb) mb.onclick = () => { more = !more; render(); live(); };
     el.querySelectorAll('.chips button').forEach((b) => { b.onclick = () => { const k = +b.dataset.k; near = near.filter((q) => q !== k).concat(sel >= 0 ? [sel] : []); select(k); }; });
+    if (near.length) el.querySelector('.chips .note').textContent = 'рядом (тусклые кольца; ещё нажатие туда же — следующий):';
   }
   // живые сведения: SGP4 одного спутника (satellite.js грузится один раз при первом выборе)
   let lib = null;
@@ -104,7 +117,7 @@ export function createCard({ R, canvas, clock, log, rec, speed }) {
     if (sel < 0) return;
     const k = sel, tb = el.querySelector('.live'); if (!tb) return;
     try {
-      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.20');
+      if (!lib) lib = await import('../vendor/satellite.mjs?v=0.21');
       if (k !== sel) return;
       const s = list[k]; if (!sat && s && s.omm) sat = lib.json2satrec(s.omm);
       if (!sat) { tb.innerHTML = ''; return; }

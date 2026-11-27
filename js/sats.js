@@ -3,9 +3,9 @@
 // js/orbit.js; расхождение с SGP4 — доли пикселя), видеокарта между пересчётами ведёт каждый спутник сама.
 // Как в основном проекте: «художественная» шкала высот, точки (известные — 0,06 R, малые — 0,032 R, 3–40 px),
 // подписи и орбиты только у известных (group «context»). Оси — инерциальные (ECI), единица — радиус Земли.
-import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.20';
-import { RS_GLSL, setRS } from './rshutter.js?v=0.20';
-import { buildModel, modelKind } from './models.js?v=0.20';
+import { fromOMM, at, posFrom, artR, fromRV, RE, MU } from './orbit.js?v=0.21';
+import { RS_GLSL, setRS } from './rshutter.js?v=0.21';
+import { buildModel, modelKind } from './models.js?v=0.21';
 
 const KEPLER = `
 vec3 satPos(vec4 e0, vec4 e1, float dt) {           // e0: a (R), e, i, узел; e1: перицентр, M, n (рад/с), размер
@@ -41,9 +41,9 @@ uniform mat4 P; uniform mat4 MV; uniform float dt; uniform float px;
 ${KEPLER}
 ${RS_GLSL}
 void main(){ vec4 q = MV * vec4(satPos(e0, e1, dt), 1.0); gl_Position = rsW(P * q); gl_PointSize = px; }`;
-const FS_R = `precision mediump float; uniform float pf;   // тот же размер, своя переменная (точность в шейдерах разная)
+const FS_R = `precision mediump float; uniform float pf; uniform float ca;   // pf — тот же размер (точность в шейдерах разная); ca — яркость
 void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d) * pf, R = pf * 0.5;
-  float a = smoothstep(R - 4.0, R - 2.5, r) * (1.0 - smoothstep(R - 1.5, R, r)); if (a < 0.01) discard;
+  float a = smoothstep(R - 4.0, R - 2.5, r) * (1.0 - smoothstep(R - 1.5, R, r)) * ca; if (a < 0.01) discard;
   gl_FragColor = vec4(vec3(a), a); }`;
 // подписи: прямоугольник постоянного экранного размера справа сверху от точки
 const VS_T = `attribute vec4 e0; attribute vec4 e1; attribute vec4 q;   // q: угол (px), uv
@@ -179,7 +179,7 @@ export function createSats(gl, list, groups, o = {}) {
   const onMain = () => kinds.forEach((kind, j) => setTimeout(() => attach({ kind, ...buildModel(kind) }), 30 * (j + 1)));   // запасной путь: по модели за раз
   if (kinds.length) {
     try {
-      const w = new Worker(new URL('./modelworker.js?v=0.20', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL('./modelworker.js?v=0.21', import.meta.url), { type: 'module' });
       let got = 0; w.onmessage = (e) => { attach(e.data); if (++got === kinds.length) w.terminate(); };
       w.onerror = (e) => { e.preventDefault && e.preventDefault(); w.terminate(); if (!got) onMain(); };
       w.postMessage(kinds);
@@ -188,7 +188,7 @@ export function createSats(gl, list, groups, o = {}) {
 
   let tRef = 0, wallRef = 0, lastOrbit = -1e9;
   // выбранный спутник: кольцо, его орбита, у малых — модель вместо точки
-  let sel = -1, selM = null, selOrbitT = -1e18;
+  let sel = -1, selM = null, selOrbitT = -1e18, near = [], warm = 0;
   const bOs = gl.createBuffer(), orbS = new Float32Array((seg + 1) * 3);
   const isCtx = (k) => list[k].group === 'context';
   // пересчёт элементов на момент t (мс модельного времени)
@@ -326,23 +326,39 @@ export function createSats(gl, list, groups, o = {}) {
     gl.drawArrays(gl.POINTS, 0, n);
     gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1); gl.disableVertexAttribArray(ac);
     if (M.length || selM) drawModels(P, MV, sunE, dt, rs, F, dpr);
-    // кольцо выбранного
+    // прогрев (один кадр, когда модели готовы): модели малых и кольцо рисуются в 1 пиксель — драйвер готовит всё
+    // заранее, и первое нажатие не даёт фриза
+    if (warm === 0 && pM && geo.cube3 && geo.micro && n) {
+      warm = 1; const keep = selM; gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, 1, 1);
+      for (const kind of ['cube3', 'micro']) { selM = { k: 0, kind, g: geo[kind], scale: scaleOf(kind) }; drawModels(P, MV, sunE, dt, rs, F, dpr); }
+      selM = keep;
+    } else if (warm === 1) warm = 2;
+    // кольцо выбранного (яркое) и кольца соседей по нажатию (тусклые, маленькие) — чтобы видно было, кто есть кто
+    const rings = [];
     if (sel >= 0 && el[sel * 8] > 0) {
-      gl.useProgram(pR); setRS(gl, pR, rs);
-      gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'MV'), false, MV);
-      gl.uniform1f(gl.getUniformLocation(pR, 'dt'), dt);
       const m = M.find((q) => q.k === sel) || selM;
       let rpx = 22 * dpr;                                               // радиус кольца — по размеру модели на экране, не меньше 22 css px
       if (m && m.g && m.px) rpx = Math.max(rpx, m.px * 0.75 + 6 * dpr);
-      const ps = Math.min(2 * rpx, 250 * dpr); gl.uniform1f(gl.getUniformLocation(pR, 'px'), ps); gl.uniform1f(gl.getUniformLocation(pR, 'pf'), ps);
+      rings.push([sel, Math.min(2 * rpx, 250 * dpr), 1]);
+    }
+    for (const k of near) if (k !== sel && el[k * 8] > 0) rings.push([k, 18 * dpr, 0.5]);
+    if (warm === 1 && n) rings.push([0, 4, 0]);                         // прогрев: шейдер кольца — до первого нажатия
+    if (rings.length) {
+      gl.useProgram(pR); setRS(gl, pR, rs);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'P'), false, P); gl.uniformMatrix4fv(gl.getUniformLocation(pR, 'MV'), false, MV);
+      gl.uniform1f(gl.getUniformLocation(pR, 'dt'), dt);
       const a0 = gl.getAttribLocation(pR, 'e0'), a1 = gl.getAttribLocation(pR, 'e1');
       gl.bindBuffer(gl.ARRAY_BUFFER, bE);
       gl.enableVertexAttribArray(a0); gl.vertexAttribPointer(a0, 4, gl.FLOAT, false, 32, 0);
       gl.enableVertexAttribArray(a1); gl.vertexAttribPointer(a1, 4, gl.FLOAT, false, 32, 16);
       gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
-      gl.drawArrays(gl.POINTS, sel, 1);
+      for (const [k, ps, ca] of rings) {
+        gl.uniform1f(gl.getUniformLocation(pR, 'px'), ps); gl.uniform1f(gl.getUniformLocation(pR, 'pf'), ps); gl.uniform1f(gl.getUniformLocation(pR, 'ca'), ca);
+        gl.drawArrays(gl.POINTS, k, 1);
+      }
       gl.disable(gl.BLEND); gl.depthMask(true); gl.disableVertexAttribArray(a0); gl.disableVertexAttribArray(a1);
     }
+    if (warm === 1) gl.disable(gl.SCISSOR_TEST);
     // подписи
     if (L.length) {
       gl.useProgram(pT); setRS(gl, pT, rs);
@@ -362,8 +378,8 @@ export function createSats(gl, list, groups, o = {}) {
     }
   }
   // выбрать спутник k (−1 — снять выбор). У малых — модель «под лупой» вместо точки
-  function select(k) {
-    sel = k >= 0 && k < n ? k : -1; selM = null; selOrbitT = -1e18;
+  function select(k, nearby = []) {
+    sel = k >= 0 && k < n ? k : -1; selM = null; selOrbitT = -1e18; near = sel >= 0 ? nearby.slice(0, 6) : [];
     if (sel >= 0 && !isCtx(sel) && pM) {
       const kind = list[sel].cube ? 'cube3' : 'micro';
       selM = { k: sel, kind, g: geo[kind] || null, scale: geo[kind] ? scaleOf(kind) : 0 };
